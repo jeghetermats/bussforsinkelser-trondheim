@@ -1,0 +1,10 @@
+# Store datafiler - hentes med retrieval.py
+*.parquet
+data/
+models/
+__pycache__/
+
+# Streamlit-appen trenger testprediksjonene (ca. 30 MB)
+!reports/test_predictions.parquet
+# Hurtigkjøringer
+reports/*_quick*

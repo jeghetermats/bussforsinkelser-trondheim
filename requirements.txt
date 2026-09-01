@@ -1,0 +1,12 @@
+google-cloud-bigquery
+google-cloud-bigquery-storage
+db-dtypes
+tqdm
+duckdb
+pandas
+pyarrow
+lightgbm
+matplotlib
+requests
+streamlit
+altair
