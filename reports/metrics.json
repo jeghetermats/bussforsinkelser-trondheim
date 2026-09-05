@@ -1,0 +1,57 @@
+{
+  "Baseline 0 - global median": {
+    "MAE_s": 129.15056335183777,
+    "RMSE_s": 211.3292622110632,
+    "innen_1min_%": 39.58744281943623,
+    "innen_2min_%": 67.84139262265055
+  },
+  "Baseline 1 - historisk median per linje/stopp/time/dagtype": {
+    "MAE_s": 107.40592036050761,
+    "RMSE_s": 182.41885033066828,
+    "innen_1min_%": 48.7633382177511,
+    "innen_2min_%": 72.12406421130743
+  },
+  "LightGBM": {
+    "MAE_s": 102.24758627114807,
+    "RMSE_s": 169.45779977240142,
+    "innen_1min_%": 48.11427424127145,
+    "innen_2min_%": 73.09184818853852
+  },
+  "_info": {
+    "quick_mode": false,
+    "test_periode": "2025-11-01 - 2025-12-31",
+    "n_test": 1703376,
+    "n_train": 5280181,
+    "best_iter": 1202,
+    "valid_MAE_s": null,
+    "features": [
+      "line",
+      "stop",
+      "direction",
+      "seq",
+      "n_stops",
+      "route_frac",
+      "sched_min_from_start",
+      "trip_start_min",
+      "minute_of_day",
+      "hour",
+      "weekday",
+      "daylight_h",
+      "is_holiday",
+      "is_school_break",
+      "temp",
+      "precip",
+      "snowfall",
+      "snow_depth",
+      "wind",
+      "precip_3h",
+      "daytype",
+      "hist_med_lsdhd",
+      "hist_n_lsdhd",
+      "hist_mean_lsd",
+      "hist_std_lsd",
+      "hist_mean_lhd",
+      "hist_mean_sh"
+    ]
+  }
+}
