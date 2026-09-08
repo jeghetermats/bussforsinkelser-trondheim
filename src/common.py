@@ -1,4 +1,4 @@
-"""Felles kode for trening og evaluering (features, baselines, metrikker)."""
+"""Felles kode for trening og evaluering (datainnlasting, features, metrikker)."""
 from pathlib import Path
 
 import numpy as np
@@ -6,21 +6,14 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA, REPORTS, MODELS = ROOT / "data", ROOT / "reports", ROOT / "models"
-REPORTS.mkdir(exist_ok=True); MODELS.mkdir(exist_ok=True)
 
 CAT = ["line", "stop", "direction"]
 
-# Historiske forsinkelser per gruppe, brukt som features ("target encoding").
-# (navn, grupperingsnøkler, aggregering)
-HIST_SPECS = [
-    ("hist_med_lsdhd", ["line", "stop", "direction", "hour", "daytype"], "median"),
-    ("hist_n_lsdhd",   ["line", "stop", "direction", "hour", "daytype"], "size"),
-    ("hist_mean_lsd",  ["line", "stop", "direction"], "mean"),
-    ("hist_std_lsd",   ["line", "stop", "direction"], "std"),
-    ("hist_mean_lhd",  ["line", "hour", "daytype"], "mean"),
-    ("hist_mean_sh",   ["stop", "hour"], "mean"),
-]
-HIST_COLS = [name for name, _, _ in HIST_SPECS]
+# Historiske features (bygget i features.py kun fra data før radens måned)
+HIST_COLS = ["hist_med_lsdhd", "hist_mean_lsd", "hist_std_lsd", "hist_mean_lhd", "hist_mean_sh"]
+
+# Kolonner som ikke er features: mål, dato, baseline-prognosen og id-/visningskolonner til appen
+NON_FEATURES = ("y", "date", "baseline", "journey_id", "stop_name", "origin_name", "dest_name")
 
 LGB_PARAMS = dict(objective="l1", learning_rate=0.1, num_leaves=255, min_data_in_leaf=200,
                   feature_fraction=0.9, bagging_fraction=0.8, bagging_freq=1,
@@ -28,16 +21,20 @@ LGB_PARAMS = dict(objective="l1", learning_rate=0.1, num_leaves=255, min_data_in
                   num_threads=0, verbose=-1, seed=42)
 
 
+def ensure_dirs():
+    REPORTS.mkdir(exist_ok=True)
+    MODELS.mkdir(exist_ok=True)
+
+
 def load(split):
-    """Leser data/<split>.parquet og gjør klar kolonnetyper og dagtype."""
+    """Leser data/<split>.parquet med kompakte datatyper."""
     df = pd.read_parquet(DATA / f"{split}.parquet")
     for c in df.select_dtypes("float64").columns:
         df[c] = df[c].astype("float32")
-    for c in df.select_dtypes("int64").columns:
-        df[c] = df[c].astype("int32")
+    for c in df.select_dtypes(["int64", "int32"]).columns:
+        if c != "y":
+            df[c] = pd.to_numeric(df[c], downcast="integer")
     df["date"] = pd.to_datetime(df["date"])
-    df["daytype"] = np.select([df.weekday == 7, df.weekday == 6], [2, 1], 0).astype("int8")  # hverdag/lør/søn
-    df.loc[df.is_holiday == 1, "daytype"] = 2                                                   # helligdag ~ søndag
     return df
 
 
@@ -49,50 +46,28 @@ def set_categories(*dfs):
             d[c] = pd.Categorical(d[c].astype("object"), categories=cats)
 
 
-ID_COLS = ("y", "date", "journey_id", "stop_name", "origin_name", "dest_name")   # ikke features
-
-
-def base_features(df):
-    return [c for c in df.columns if c not in ID_COLS and c not in HIST_COLS]
+def feature_columns(df):
+    return [c for c in df.columns if c not in NON_FEATURES]
 
 
 def metrics(y, pred):
-    err = pred - y
+    err = np.asarray(pred, dtype="float64") - np.asarray(y, dtype="float64")
     return {"MAE_s": float(np.mean(np.abs(err))),
             "RMSE_s": float(np.sqrt(np.mean(err ** 2))),
             "innen_1min_%": float(np.mean(np.abs(err) <= 60) * 100),
             "innen_2min_%": float(np.mean(np.abs(err) <= 120) * 100)}
 
 
-def group_median_baseline(train, test):
-    """Historisk median med fallback til grovere grupper når en kombinasjon mangler."""
-    levels = [["line", "stop", "direction", "hour", "daytype"],
-              ["line", "stop", "direction"],
-              ["line", "hour", "daytype"],
-              ["line"]]
-    pred = pd.Series(np.nan, index=test.index, dtype="float64")
-    for keys in levels:
-        med = train.groupby(keys, observed=True)["y"].median().rename("m")
-        pred = pred.fillna(test[keys].join(med, on=keys)["m"])
-    return pred.fillna(train.y.median()).to_numpy()
-
-
-def hist_features(fit, apply):
-    """Beregner historiske statistikker på `fit` og slår dem opp for radene i `apply`."""
-    out = pd.DataFrame(index=apply.index)
-    for name, keys, agg in HIST_SPECS:
-        stat = fit.groupby(keys, observed=True)["y"].agg(agg).rename(name).astype("float32")
-        out[name] = apply[keys].join(stat, on=keys)[name]
-    return out
-
-
-def oof_hist_features(df, k=5):
-    """Out-of-fold: hver rad får statistikk beregnet UTEN sin egen fold.
-    Uten dette ville radens egen forsinkelse lekke inn i featuren, og modellen ville
-    stole altfor mye på den (overfitting). Foldene er hele dager, så en tur aldri deler seg."""
-    fold = df["date"].dt.dayofyear.to_numpy() % k
-    out = pd.DataFrame(index=df.index, columns=HIST_COLS, dtype="float32")
-    for f in range(k):
-        mask = fold == f
-        out.loc[mask, HIST_COLS] = hist_features(df.loc[~mask], df.loc[mask]).to_numpy()
-    return out
+def bootstrap_mae_gain(dates, y, pred_model, pred_base, n_boot=2000, seed=0):
+    """95 %-intervall for relativ MAE-forbedring, med hele dager som trekkenhet
+    (rader samme dag er ikke uavhengige: samme vær, trafikk og hendelser)."""
+    d = pd.DataFrame({"date": dates, "em": np.abs(pred_model - y), "eb": np.abs(pred_base - y)})
+    per_day = d.groupby("date")[["em", "eb"]].agg(["sum", "count"])
+    sm, sb, n = per_day[("em", "sum")].to_numpy(), per_day[("eb", "sum")].to_numpy(), per_day[("em", "count")].to_numpy()
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(sm), size=(n_boot, len(sm)))
+    gain = 1 - sm[idx].sum(1) / sb[idx].sum(1)
+    return {"forbedring_%": float((1 - sm.sum() / sb.sum()) * 100),
+            "ci95_lav_%": float(np.percentile(gain, 2.5) * 100),
+            "ci95_høy_%": float(np.percentile(gain, 97.5) * 100),
+            "dager": int(len(sm))}
