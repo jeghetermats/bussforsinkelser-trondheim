@@ -1,29 +1,35 @@
 {
   "Baseline 0 - global median": {
-    "MAE_s": 129.15056335183777,
-    "RMSE_s": 211.3292622110632,
-    "innen_1min_%": 39.58744281943623,
-    "innen_2min_%": 67.84139262265055
+    "MAE_s": 129.25748278712393,
+    "RMSE_s": 211.64315031965992,
+    "innen_1min_%": 39.72364293027494,
+    "innen_2min_%": 67.83006218239544
   },
   "Baseline 1 - historisk median per linje/stopp/time/dagtype": {
-    "MAE_s": 107.40592036050761,
-    "RMSE_s": 182.41885033066828,
-    "innen_1min_%": 48.7633382177511,
-    "innen_2min_%": 72.12406421130743
+    "MAE_s": 106.49428282422672,
+    "RMSE_s": 181.93870573368721,
+    "innen_1min_%": 49.33074083467185,
+    "innen_2min_%": 72.54428851880031
   },
   "LightGBM": {
-    "MAE_s": 102.24758627114807,
-    "RMSE_s": 169.45779977240142,
-    "innen_1min_%": 48.11427424127145,
-    "innen_2min_%": 73.09184818853852
+    "MAE_s": 104.21187917830018,
+    "RMSE_s": 174.19977397212688,
+    "innen_1min_%": 47.97901344154197,
+    "innen_2min_%": 72.64344454776867
   },
   "_info": {
     "quick_mode": false,
     "test_periode": "2025-11-01 - 2025-12-31",
     "n_test": 1703376,
-    "n_train": 5280181,
-    "best_iter": 1202,
-    "valid_MAE_s": null,
+    "n_train": 7013854,
+    "best_iter": 911,
+    "valid_MAE_s": 93.47728516969681,
+    "mae_forbedring_mot_baseline": {
+      "forbedring_%": 2.1432170679939078,
+      "ci95_lav_%": 0.8988604763830368,
+      "ci95_høy_%": 3.1457510651038945,
+      "dager": 61
+    },
     "features": [
       "line",
       "stop",
@@ -36,18 +42,17 @@
       "minute_of_day",
       "hour",
       "weekday",
-      "daylight_h",
       "is_holiday",
+      "daytype",
       "is_school_break",
+      "daylight_h",
       "temp",
       "precip",
       "snowfall",
       "snow_depth",
       "wind",
       "precip_3h",
-      "daytype",
       "hist_med_lsdhd",
-      "hist_n_lsdhd",
       "hist_mean_lsd",
       "hist_std_lsd",
       "hist_mean_lhd",
