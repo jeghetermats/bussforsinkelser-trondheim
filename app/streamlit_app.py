@@ -53,7 +53,7 @@ lgbm, base = metrics["LightGBM"], metrics[B1]
 st.title("Bussforsinkelser i Trondheim")
 st.write(
     "Hvor forsinket blir bussen ved hvert stopp - **før turen har startet**? En LightGBM-modell er trent på "
-    "sanntidsdata fra Entur for AtB (des 2024 - okt 2025) og testet på nov-des 2025, som den aldri har sett. "
+    "sanntidsdata fra Entur for AtB (jan-okt 2025) og testet på nov-des 2025, som den aldri har sett. "
     "Den sammenlignes med en historisk median for samme linje, stopp, retning, time og dagtype."
 )
 
@@ -70,7 +70,7 @@ if rolling is not None:
     wins = int((rolling.MAE_lgbm < rolling.MAE_baseline).sum())
     k4.metric("Slår baselinen", f"{wins} av {len(rolling)} måneder", delta="rullende test 2025",
               delta_color="off", delta_arrow="off", border=True,
-              help="Hver måned i 2025 testet med en modell trent bare på data fra før måneden.")
+              help="Hver måned feb-des 2025 testet med en modell trent bare på tidligere måneder.")
 
 # ================= Utforsk en tur: kontroller til venstre, graf til høyre =================
 st.subheader("Utforsk en tur fra testperioden")
@@ -93,86 +93,91 @@ with left:
                              format="DD.MM.YYYY")
 
         t_day = t_dir[t_dir.date == date].sort_values("start")
+        trip = None
         if t_day.empty:
             st.selectbox("Avgang", ["Ingen turer denne dagen"], disabled=True)
-            st.info("Linjen har ingen turer i datautvalget denne dagen. Velg en annen dato.")
-            st.stop()
-        labels = {r.trip: f"{fmt_clock(r.start)} fra {r.origin}" for r in t_day.itertuples()}
-        # Standard: turen i ettermiddagsrushet (15-17) med størst faktisk forsinkelse - fast regel
-        rush = t_day[(t_day.start >= 15 * 60) & (t_day.start < 17 * 60)]
-        default = 0
-        if not rush.empty:
-            worst = df[df.trip.isin(rush.trip)].groupby("trip")["y"].mean().idxmax()
-            default = t_day["trip"].tolist().index(int(worst))
-        trip = st.selectbox("Avgang", list(labels), index=default, format_func=labels.get)
+        else:
+            labels = {r.trip: f"{fmt_clock(r.start)} fra {r.origin}" for r in t_day.itertuples()}
+            # Standard: turen i ettermiddagsrushet (15-17) med størst faktisk forsinkelse - fast regel
+            rush = t_day[(t_day.start >= 15 * 60) & (t_day.start < 17 * 60)]
+            default = 0
+            if not rush.empty:
+                worst = df[df.trip.isin(rush.trip)].groupby("trip")["y"].mean().idxmax()
+                default = t_day["trip"].tolist().index(int(worst))
+            trip = st.selectbox("Avgang", list(labels), index=default, format_func=labels.get)
         st.caption("Utvalget inneholder omtrent én av fire turer, så ikke alle avganger er med.")
 
-t = df[df.trip == trip].sort_values("seq")
-info = trips[trips.trip == trip].iloc[0]
-mae_model = float(np.mean(np.abs(t.pred_lgbm - t.y)))
-mae_base = float(np.mean(np.abs(t.pred_baseline - t.y)))
+if trip is None:
+    # Dato uten turer: vis beskjed i turpanelet, men la resten av siden stå (ikke st.stop())
+    with right:
+        st.info("Linjen har ingen turer i datautvalget denne dagen. Velg en annen dato.")
+else:
+    t = df[df.trip == trip].sort_values("seq")
+    info = trips[trips.trip == trip].iloc[0]
+    mae_model = float(np.mean(np.abs(t.pred_lgbm - t.y)))
+    mae_base = float(np.mean(np.abs(t.pred_baseline - t.y)))
 
-with right:
-    with st.container(border=True):
-        card_title(f"Linje {line}, {fmt_date(date)} kl. {fmt_clock(info.start)}: {info.origin} -> {info.dest}")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Faktisk forsinkelse (snitt)", fmt_delay(t.y.mean()),
-                  help="Gjennomsnitt over alle stoppene på turen.")
-        m2.metric("Feil - LightGBM", fmt_delay(mae_model),
-                  help="Gjennomsnittlig avvik mellom prognose og faktisk forsinkelse per stopp.")
-        m3.metric("Feil - historisk median", fmt_delay(mae_base),
-                  help="Gjennomsnittlig avvik for baselinen per stopp.")
-        diff = mae_base - mae_model
-        if abs(diff) < 5:
-            st.caption("Modellen og baselinen traff omtrent like godt på denne turen.")
-        elif diff > 0:
-            st.caption(f"På denne turen traff LightGBM i snitt **{fmt_delay(diff)} bedre** enn baselinen per stopp.")
-        else:
-            st.caption(f"På denne turen traff baselinen i snitt **{fmt_delay(-diff)} bedre** enn LightGBM per stopp.")
-        long = t.melt(id_vars=["seq", "stop_name", "minute_of_day"],
-                      value_vars=["y", "pred_lgbm", "pred_baseline"], var_name="serie", value_name="sek")
-        long["serie"] = long["serie"].map({"y": "Faktisk", "pred_lgbm": "LightGBM",
-                                           "pred_baseline": "Historisk median"})
-        long["min"] = long["sek"] / 60
-        long["planlagt"] = long["minute_of_day"].map(fmt_clock)
-        long["stop_name"] = long["stop_name"].astype(str)
-        long["tekst"] = long["sek"].map(fmt_delay)
-        chart = line_chart(
-            long,
-            x=alt.X("stop_name:N", sort=t["stop_name"].astype(str).tolist(), title=None,
-                    axis=alt.Axis(labelAngle=-40, labelLimit=130, labelOverlap=True)),
-            y=alt.Y("min:Q", title="Forsinkelse (minutter)"),
-            domain=list(SERIES), height=540,
-            tooltip=[alt.Tooltip("stop_name:N", title="Stopp"), alt.Tooltip("planlagt:N", title="Planlagt"),
-                     alt.Tooltip("serie:N", title="Serie"), alt.Tooltip("tekst:N", title="Forsinkelse")],
-        )
-        zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#C9CDD3").encode(y="y:Q")
-        st.altair_chart(zero + chart, width="stretch")
+    with right:
+        with st.container(border=True):
+            card_title(f"Linje {line}, {fmt_date(date)} kl. {fmt_clock(info.start)}: {info.origin} -> {info.dest}")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Faktisk forsinkelse (snitt)", fmt_delay(t.y.mean()),
+                      help="Gjennomsnitt over alle stoppene på turen.")
+            m2.metric("Feil - LightGBM", fmt_delay(mae_model),
+                      help="Gjennomsnittlig avvik mellom prognose og faktisk forsinkelse per stopp.")
+            m3.metric("Feil - historisk median", fmt_delay(mae_base),
+                      help="Gjennomsnittlig avvik for baselinen per stopp.")
+            diff = mae_base - mae_model
+            if abs(diff) < 5:
+                st.caption("Modellen og baselinen traff omtrent like godt på denne turen.")
+            elif diff > 0:
+                st.caption(f"På denne turen traff LightGBM i snitt **{fmt_delay(diff)} bedre** enn baselinen per stopp.")
+            else:
+                st.caption(f"På denne turen traff baselinen i snitt **{fmt_delay(-diff)} bedre** enn LightGBM per stopp.")
+            long = t.melt(id_vars=["seq", "stop_name", "minute_of_day"],
+                          value_vars=["y", "pred_lgbm", "pred_baseline"], var_name="serie", value_name="sek")
+            long["serie"] = long["serie"].map({"y": "Faktisk", "pred_lgbm": "LightGBM",
+                                               "pred_baseline": "Historisk median"})
+            long["min"] = long["sek"] / 60
+            long["planlagt"] = long["minute_of_day"].map(fmt_clock)
+            long["stop_name"] = long["stop_name"].astype(str)
+            long["tekst"] = long["sek"].map(fmt_delay)
+            chart = line_chart(
+                long,
+                x=alt.X("stop_name:N", sort=t["stop_name"].astype(str).tolist(), title=None,
+                        axis=alt.Axis(labelAngle=-40, labelLimit=130, labelOverlap=True)),
+                y=alt.Y("min:Q", title="Forsinkelse (minutter)"),
+                domain=list(SERIES), height=540,
+                tooltip=[alt.Tooltip("stop_name:N", title="Stopp"), alt.Tooltip("planlagt:N", title="Planlagt"),
+                         alt.Tooltip("serie:N", title="Serie"), alt.Tooltip("tekst:N", title="Forsinkelse")],
+            )
+            zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#C9CDD3").encode(y="y:Q")
+            st.altair_chart(zero + chart, width="stretch")
 
-with left:
-    with st.container(border=True):
-        card_title("Slik leser du grafen")
-        st.markdown(
-            "- **Svart:** faktisk forsinkelse ved hvert stopp.\n"
-            "- **Blå:** LightGBM-prognosen, laget før avgang.\n"
-            "- **Grå stiplet:** historisk median for samme linje, stopp, time og dagtype."
-        )
-        st.caption(
-            "Prognosen kjenner det typiske mønsteret, men ikke hva som skjer underveis. Når forsinkelsen bygger "
-            "seg opp i trafikken, havner både modellen og baselinen ofte under den faktiske linjen."
-        )
+    with left:
+        with st.container(border=True):
+            card_title("Slik leser du grafen")
+            st.markdown(
+                "- **Svart:** faktisk forsinkelse ved hvert stopp.\n"
+                "- **Blå:** LightGBM-prognosen, laget før avgang.\n"
+                "- **Grå stiplet:** historisk median for samme linje, stopp, time og dagtype."
+            )
+            st.caption(
+                "Prognosen kjenner det typiske mønsteret, men ikke hva som skjer underveis. Når forsinkelsen bygger "
+                "seg opp i trafikken, havner både modellen og baselinen ofte under den faktiske linjen."
+            )
 
-with st.expander("Alle stopp på turen i tabell"):
-    table = pd.DataFrame({
-        "Stopp": t.stop_name.astype(str).to_numpy(),
-        "Planlagt": t.minute_of_day.map(fmt_clock).to_numpy(),
-        "Faktisk": t.y.map(fmt_delay).to_numpy(),
-        "LightGBM": t.pred_lgbm.map(fmt_delay).to_numpy(),
-        "Historisk median": t.pred_baseline.map(fmt_delay).to_numpy(),
-        "Modellens feil": (t.pred_lgbm - t.y).map(fmt_delay).to_numpy(),
-    })
-    st.dataframe(table, hide_index=True, height=(len(table) + 1) * 35 + 3)   # ingen egen rullefelt
-    st.caption("Modellens feil = prognose minus faktisk. Negativ betyr at bussen var mer forsinket enn antatt.")
+    with st.expander("Alle stopp på turen i tabell"):
+        table = pd.DataFrame({
+            "Stopp": t.stop_name.astype(str).to_numpy(),
+            "Planlagt": t.minute_of_day.map(fmt_clock).to_numpy(),
+            "Faktisk": t.y.map(fmt_delay).to_numpy(),
+            "LightGBM": t.pred_lgbm.map(fmt_delay).to_numpy(),
+            "Historisk median": t.pred_baseline.map(fmt_delay).to_numpy(),
+            "Modellens feil": (t.pred_lgbm - t.y).map(fmt_delay).to_numpy(),
+        })
+        st.dataframe(table, hide_index=True, height=(len(table) + 1) * 35 + 3)   # ingen egen rullefelt
+        st.caption("Modellens feil = prognose minus faktisk. Negativ betyr at bussen var mer forsinket enn antatt.")
 
 # ================= Mønstre og treffsikkerhet: to kort i bredden =================
 st.subheader("Mønstre og treffsikkerhet")
@@ -214,8 +219,8 @@ with b:
                 tooltip=[alt.Tooltip("month:N", title="Måned"), alt.Tooltip("serie:N", title="Modell"),
                          alt.Tooltip("mae:Q", title="MAE (s)", format=".1f")],
             ), width="stretch")
-            st.caption("Hver måned er testet med en modell trent bare på data fra før måneden. Januar har bare "
-                       "én måned med historikk, og derfor minst forbedring.")
+            st.caption("Hver måned feb-des er testet med en modell trent bare på tidligere måneder. Januar mangler "
+                       "fordi det ikke finnes treningsmåneder før den. Y-aksen starter ikke på 0.")
 
 c, e = st.columns(2)
 with c:
@@ -244,8 +249,9 @@ with c:
             """
 - **Kun informasjon kjent før avgang:** linje, stopp, retning, rutetid, kalender, dagslys og vær.
   Forsinkelse ved forrige stopp er bevisst utelatt - den ville gjort oppgaven triviell.
-- **Tidsbasert splitt:** trening des 2024-aug 2025, validering sep-okt, test nov-des 2025.
-- **Historiske features** med *out-of-fold target encoding*, så ingen rad ser sin egen fasit.
+- **Tidsbasert splitt:** trening jan-aug 2025, validering sep-okt, test nov-des 2025.
+- **Historiske features og baseline** bygges fra alle ~43 mill. stoppanløp, men bare fra data før radens måned
+  (oppdatert månedlig) - slik en ekte tjeneste ville hatt dem.
 - **LightGBM med L1-tap**, som treffer medianen og minimerer gjennomsnittlig absolutt feil.
 """
         )
