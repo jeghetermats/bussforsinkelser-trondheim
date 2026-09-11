@@ -1,4 +1,5 @@
 """Felles kode for trening og evaluering (datainnlasting, features, metrikker)."""
+import os
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,7 @@ DATA, REPORTS, MODELS = ROOT / "data", ROOT / "reports", ROOT / "models"
 
 CAT = ["line", "stop", "direction"]
 
-# Historiske features (bygget i features.py kun fra data før radens måned)
+# Historiske features (se src/history.py)
 HIST_COLS = ["hist_med_lsdhd", "hist_mean_lsd", "hist_std_lsd", "hist_mean_lhd", "hist_mean_sh"]
 
 # Kolonner som ikke er features: mål, dato, baseline-prognosen og id-/visningskolonner til appen
@@ -19,6 +20,15 @@ LGB_PARAMS = dict(objective="l1", learning_rate=0.1, num_leaves=255, min_data_in
                   feature_fraction=0.9, bagging_fraction=0.8, bagging_freq=1,
                   cat_smooth=20, max_cat_threshold=64, max_bin=255,
                   num_threads=0, verbose=-1, seed=42)
+
+# GPU (OpenCL): sett miljøvariabelen LGB_DEVICE=gpu. Krever en LightGBM-build med GPU-støtte.
+# NB: GPU-versjonen tåler maks 256 bins per feature. 'stop' har tusenvis av kategorier, så
+# modellene i dette prosjektet må kjøres på CPU ('bin size ... cannot run on GPU').
+# max_bin=63 er LightGBMs anbefaling for GPU - det endrer modellen litt, så sammenlign bare
+# kjøringer med samme enhet.
+if os.environ.get("LGB_DEVICE", "").lower() == "gpu":
+    LGB_PARAMS.update(device_type="gpu", max_bin=63, gpu_use_dp=False)
+    os.environ.setdefault("BOOST_COMPUTE_USE_OFFLINE_CACHE", "0")   # unngår feil i OpenCL-kernel-cachen når Windows ikke bruker UTF-8 (f.eks. japansk systemspråk)
 
 
 def ensure_dirs():
@@ -47,7 +57,15 @@ def set_categories(*dfs):
 
 
 def feature_columns(df):
-    return [c for c in df.columns if c not in NON_FEATURES]
+    """Feature-kolonner. refit_* er historikk til retreningssteget (erstatter hist_* der)."""
+    return [c for c in df.columns if c not in NON_FEATURES and not c.startswith("refit_")]
+
+
+def use_refit_history(df):
+    """Bytter hist_* med refit_hist_* (fold-historikk over trening+valid) før retrening."""
+    for c in [c for c in df.columns if c.startswith("refit_")]:
+        df[c[len("refit_"):]] = df.pop(c)
+    return df
 
 
 def metrics(y, pred):
