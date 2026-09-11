@@ -5,22 +5,22 @@ Bygger datasettene for oppgaven:
 Kun informasjon som er kjent før avgang brukes (rute, stopp, rutetid, kalender, vær og historikk).
 Forsinkelse ved forrige stopp brukes IKKE.
 
-Tre steg, alt i DuckDB (data/features.duckdb):
-  1. clean  - ALLE rensede stoppanløp (~43 mill.) med features.
-  2. hist_* - historisk statistikk per måned, beregnet KUN fra data før måneden starter
-              (månedlig oppdatert historikk, slik en ekte tjeneste ville hatt).
-              Statistikken bruker alle rader, ikke et utvalg.
-  3. Utvalg av turer skrives til parquet, med historikk og baseline slått opp for radens måned.
+Steg, alt i DuckDB (data/features.duckdb):
+  1. clean - ALLE rensede stoppanløp (~43 mill.) med features.
+  2. Historikk over alle rader (se src/history.py):
+       fold-historikk for periodene t.o.m. aug og t.o.m. okt  -> modellens historikk-features
+       månedlig fortid                                        -> baseline (historisk median)
+  3. Utvalg av turer skrives til parquet:
+       train (jan-aug 2025): hist_* = fold-historikk t.o.m. aug,   refit_hist_* = fold-historikk t.o.m. okt
+       valid (sep-okt 2025): hist_* = alt t.o.m. aug (kun fortid), refit_hist_* = fold-historikk t.o.m. okt
+       test  (nov-des 2025): hist_* = alt t.o.m. okt (kun fortid)
+     'baseline' = historisk median per (linje, stopp, retning, time, dagtype) fra alle rader før
+     radens måned, med fallback - den sterkeste ærlige baselinen vi har.
 
-Baseline = historisk median for (linje, stopp, retning, time, dagtype), med fallback til grovere
-grupper - beregnet med nøyaktig samme månedlige historikk som modellens features.
-
-Splitter (data fra 3. des 2024; desember 2024 brukes bare som historikk):
-  train = jan-aug 2025, valid = sep-okt 2025, test = nov-des 2025
-  all   = hele 2025 (mindre utvalg), brukes av src/rolling_eval.py
+Valget av fold-historikk er gjort med src/ablation.py --cv (mars-okt), ikke på testperioden.
 
 Kjør:  python src/features.py              (bygger alt)
-       python src/features.py --reuse      (gjenbruker clean-tabellen fra forrige kjøring)
+       python src/features.py --reuse      (gjenbruker clean og historikktabeller fra forrige kjøring)
 Valgfritt: DUCKDB_MEMORY_LIMIT=8GB og DUCKDB_THREADS=8 som miljøvariabler.
 """
 import os
@@ -29,6 +29,8 @@ import time
 from pathlib import Path
 
 import duckdb
+
+from history import BASELINE_SQL, baseline_select, build_oof, build_past_monthly, feature_select, join_sql
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -45,12 +47,12 @@ RAW_SQL = "read_parquet([" + ", ".join(f"'{f.as_posix()}'" for f in raw_files) +
 
 # Andel av turene som tas med i hver split (sampling på turnivå, så hele turer holdes samlet).
 # Samme hash som før, så testturene er de samme som i tidligere kjøringer.
-SAMPLE_PCT = {"train": 20, "valid": 25, "test": 25, "all": 10}
+SAMPLE_PCT = {"train": 20, "valid": 25, "test": 25}
 SPLITS = {"train": ("2025-01-01", "2025-08-31"),
           "valid": ("2025-09-01", "2025-10-31"),
-          "test":  ("2025-11-01", "2025-12-31"),
-          "all":   ("2025-01-01", "2025-12-31")}
-HIST_MONTHS = [f"2025-{m:02d}-01" for m in range(1, 13)]   # måneder vi trenger historikk for
+          "test":  ("2025-11-01", "2025-12-31")}
+P1_END, P2_END = "2025-08-31", "2025-10-31"                # slutt på treningsperiode / trening+valid
+HIST_MONTHS = [f"2025-{m:02d}-01" for m in range(1, 13)]   # måneder vi trenger baseline-historikk for
 
 # Norske helligdager (inkl. julaften/nyttårsaften, som har egne ruter) og skoleferier i Trondheim (omtrentlig)
 HOLIDAYS = ["2024-12-24", "2024-12-25", "2024-12-26", "2024-12-31",
@@ -61,20 +63,6 @@ SCHOOL_BREAKS = [("2024-12-21", "2024-12-31"),
                  ("2025-01-01", "2025-01-02"), ("2025-02-24", "2025-02-28"),
                  ("2025-04-14", "2025-04-22"), ("2025-06-20", "2025-08-18"),
                  ("2025-09-29", "2025-10-03"), ("2025-12-20", "2025-12-31")]
-
-# ---------- Historiske statistikker ----------
-# tabell: (grupperingsnøkler, [(kolonnenavn, SQL-aggregat)])
-HIST_TABLES = {
-    "hist_lsdhd": (["line", "stop", "direction", "hour", "daytype"], [("hist_med_lsdhd", "median(y)")]),
-    "hist_lsd":   (["line", "stop", "direction"], [("hist_mean_lsd", "avg(y)"), ("hist_std_lsd", "stddev_samp(y)"),
-                                                    ("med_lsd", "median(y)")]),
-    "hist_lhd":   (["line", "hour", "daytype"], [("hist_mean_lhd", "avg(y)"), ("med_lhd", "median(y)")]),
-    "hist_sh":    (["stop", "hour"], [("hist_mean_sh", "avg(y)")]),
-    "hist_l":     (["line"], [("med_l", "median(y)")]),
-    "hist_g":     ([], [("med_g", "median(y)")]),
-}
-FEATURE_HIST_COLS = ["hist_med_lsdhd", "hist_mean_lsd", "hist_std_lsd", "hist_mean_lhd", "hist_mean_sh"]
-
 
 def log(msg, t0=None):
     print(msg + (f"  ({time.time() - t0:.0f}s)" if t0 else ""), flush=True)
@@ -153,44 +141,37 @@ else:
     n, d0, d1 = con.sql("SELECT count(*), min(date), max(date) FROM clean").fetchone()
     log(f"clean: {n:,} rader, {d0} - {d1}", t0)
 
-# ================= 2. Månedlig historikk, kun fra tidligere datoer =================
+# ================= 2. Historikk over alle rader =================
 t0 = time.time()
-log("Beregner historikk per måned (kun data fra før måneden) ...")
-for table, (keys, aggs) in HIST_TABLES.items():
-    key_sql = ", ".join(keys)
-    agg_sql = ", ".join(f"{expr}::FLOAT AS {name}" for name, expr in aggs)
-    parts = []
-    for m in HIST_MONTHS:
-        sel = f"SELECT DATE '{m}' AS month{', ' + key_sql if keys else ''}, {agg_sql} FROM clean WHERE date < DATE '{m}'"
-        parts.append(sel + (f" GROUP BY {key_sql}" if keys else ""))
-    con.execute(f"CREATE OR REPLACE TABLE {table} AS " + " UNION ALL ".join(parts))
-    log(f"  {table}: {con.sql(f'SELECT count(*) FROM {table}').fetchone()[0]:,} rader", t0)
-
-# Sjekk mot lekkasje: historikken for en måned skal bare bygge på data fra før måneden
-first = con.sql("SELECT min(date) FROM clean").fetchone()[0]
-n_first = con.sql(f"SELECT count(*) FROM hist_g WHERE month <= DATE '{first}' AND med_g IS NOT NULL").fetchone()[0]
-assert n_first == 0, "Lekkasje: historikk finnes for en måned uten tidligere data"
+rebuild = "--reuse" not in sys.argv
+log("Beregner historikk over alle rader ...")
+P1 = build_oof(con, P1_END, rebuild)                 # fold-historikk jan-aug (+ des 2024)
+P2 = build_oof(con, P2_END, rebuild)                 # fold-historikk t.o.m. okt (til retrening)
+PAST = build_past_monthly(con, HIST_MONTHS, rebuild)  # baseline: alt før radens måned
+log("Historikk ferdig", t0)
 
 # ================= 3. Skriv utvalgte splitter =================
-joins = []
-for table, (keys, _) in HIST_TABLES.items():
-    on = " AND ".join([f"{table}.month = c.month"] + [f"{table}.{k} = c.{k}" for k in keys])
-    joins.append(f"LEFT JOIN {table} ON {on}")
-join_sql = "\n".join(joins)
-exclude = "month, bucket, journey_id, stop_name, origin_name, dest_name"
-
+FOLD = "dayofyear(c.date) % 5"
+MONTH = "date_trunc('month', c.date)::DATE"
+EXCLUDE = "month, bucket, journey_id, stop_name, origin_name, dest_name"
+plans = {   # split: [(prefiks, hkey-uttrykk, kolonneprefiks)]
+    "train": [(P1, FOLD, ""), (P2, FOLD, "refit_")],
+    "valid": [(P1, "5", ""), (P2, FOLD, "refit_")],
+    "test":  [(P2, "5", "")],
+}
 for name, (d_from, d_to) in SPLITS.items():
     t0 = time.time()
     out = DATA / f"{name}.parquet"
+    joins, cols = [join_sql(PAST, MONTH, "b")], [baseline_select("b")]
+    for i, (prefix, hk, colpref) in enumerate(plans[name]):
+        joins.append(join_sql(prefix, hk, f"h{i}"))
+        cols.append(feature_select(f"h{i}", colpref))
     id_cols = ", c.journey_id, c.stop_name, c.origin_name, c.dest_name" if name == "test" else ""
     con.execute(f"""
     COPY (
-      SELECT c.* EXCLUDE ({exclude}),
-             {', '.join(FEATURE_HIST_COLS)},
-             coalesce(hist_med_lsdhd, med_lsd, med_lhd, med_l, med_g) AS baseline
-             {id_cols}
+      SELECT c.* EXCLUDE ({EXCLUDE}), {', '.join(cols)} {id_cols}
       FROM clean c
-      {join_sql}
+      {' '.join(joins)}
       WHERE c.bucket < {SAMPLE_PCT[name]} AND c.date BETWEEN DATE '{d_from}' AND DATE '{d_to}'
     ) TO '{out.as_posix()}' (FORMAT PARQUET)
     """)
