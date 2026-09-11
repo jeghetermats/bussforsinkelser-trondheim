@@ -8,3 +8,5 @@ __pycache__/
 !reports/test_predictions.parquet
 # Hurtigkjøringer
 reports/*_quick*
+
+reports/*_log.txt
