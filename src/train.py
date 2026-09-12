@@ -3,9 +3,10 @@ Trener og evaluerer modellen for forsinkelse før avgang.
 
   Baseline 0: median forsinkelse i treningsdata (én konstant)
   Baseline 1: historisk median per (linje, stopp, retning, time, dagtype), med fallback
-              - ferdig beregnet i features.py fra data før radens måned
-  Modell    : LightGBM (L1-tap) med kalender, vær og historiske features.
-              Early stopping på valid (sep-okt), deretter retrent på jan-okt og testet på nov-des 2025.
+              - fra alle rader før radens måned (oppdatert månedlig), ferdig beregnet i features.py
+  Modell    : LightGBM (L1-tap) med kalender, vær og historiske features (fold-historikk, se history.py).
+              Early stopping på valid (sep-okt), deretter retrent på jan-okt med fold-historikk over
+              jan-okt, og testet på nov-des 2025 med historikk kun fra data t.o.m. oktober.
 
 Kjør:  python src/train.py               (full kjøring)
        python src/train.py --quick       (rask test på et mindre utvalg)
@@ -24,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from common import (CAT, LGB_PARAMS, MODELS, REPORTS, bootstrap_mae_gain, ensure_dirs, feature_columns, load,
-                    metrics, set_categories)
+                    metrics, set_categories, use_refit_history)
 
 QUICK = "--quick" in sys.argv
 EVAL_ONLY = "--eval-only" in sys.argv
@@ -51,7 +52,7 @@ if EVAL_ONLY:
     model = lgb.Booster(model_file=str(MODEL_PATH))
     meta = json.loads(META_PATH.read_text(encoding="utf-8")) if META_PATH.exists() else {}
     best_iter, valid_mae = model.num_trees(), meta.get("valid_MAE_s")
-    full = pd.concat([train, valid], ignore_index=True)
+    full = use_refit_history(pd.concat([train, valid], ignore_index=True))
     print(f"Lastet {MODEL_PATH.name} ({best_iter} trær)")
 else:
     # 1) Antall trær med early stopping på valid (sep-okt 2025)
@@ -65,9 +66,8 @@ else:
     print(f"Beste antall trær: {best_iter}, valid-MAE {valid_mae:.1f} s  ({time.time()-t0:.0f}s)")
     del dtrain, dvalid, model
 
-    # 2) Retren på jan-okt 2025 med samme antall trær.
-    #    Historikk-kolonnene er allerede kun fra før radens måned, så ingenting må beregnes på nytt.
-    full = pd.concat([train, valid], ignore_index=True)
+    # 2) Retren på jan-okt 2025 med samme antall trær, med fold-historikk over hele jan-okt
+    full = use_refit_history(pd.concat([train, valid], ignore_index=True))
     del train, valid
     t0 = time.time()
     model = lgb.train(params, lgb.Dataset(full[FEATURES], full.y, categorical_feature=CAT), num_boost_round=best_iter)
