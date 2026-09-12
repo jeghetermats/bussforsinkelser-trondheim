@@ -1,21 +1,25 @@
 """
-Tidsbasert evaluering med ekspanderende vindu.
+Tidsbasert evaluering med ekspanderende vindu - samme oppsett som hovedmodellen.
 
-For hver måned feb-des 2025: tren på alle måneder før, test på måneden.
-Historikk-features og baseline er bygget fra data før hver rads måned (features.py), så ingen
-fremtidig informasjon brukes. Januar er utelatt fordi det ikke finnes treningsmåneder før den
-(desember 2024 er bare historikk).
+For hver måned M i mars-des 2025:
+  * historikk: fold-historikk over alle rader før M (src/history.py); radene i M ser bare fortiden
+  * trening:   rader fra jan 2025 til og med to måneder før M (20 %-utvalg, maks MAX_TRAIN rader)
+  * early stopping på måneden før M, så antall trær tilpasses datamengden (ikke fast antall)
+  * evaluering på M, mot baselinen (historisk median fra alle rader før M)
+Januar-februar mangler fordi det trengs minst én treningsmåned og én måned til early stopping.
+Desember 2024 brukes bare som historikk.
 
-Samme LightGBM-innstillinger og antall trær som hovedmodellen (leses fra models/*.json).
 Resultatene lagres etter hver måned, så skriptet kan avbrytes og startes igjen.
+Krever data/features.duckdb fra features.py.
 
 Kjør:  python src/rolling_eval.py
        python src/rolling_eval.py --quick   (2 måneder, lite utvalg)
 """
-import json
+import os
 import sys
 import time
 
+import duckdb
 import lightgbm as lgb
 import matplotlib
 matplotlib.use("Agg")
@@ -23,24 +27,43 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import CAT, LGB_PARAMS, MODELS, REPORTS, ensure_dirs, feature_columns, load, metrics, set_categories
+from common import CAT, DATA, LGB_PARAMS, REPORTS, ensure_dirs, metrics
+from history import baseline_select, build_oof, build_past_monthly, feature_select, join_sql
 
 QUICK = "--quick" in sys.argv
-MONTHS = pd.period_range("2025-03", "2025-04", freq="M") if QUICK else pd.period_range("2025-02", "2025-12", freq="M")
-MAX_TRAIN = 300_000 if QUICK else 4_000_000     # tak på treningsrader per måned (tid/minne)
-meta_path = MODELS / "lgbm_pre_departure.json"
-ROUNDS = 50 if QUICK else (json.loads(meta_path.read_text())["best_iter"] if meta_path.exists() else 800)
+MONTHS = pd.period_range("2025-03", "2025-04", freq="M") if QUICK else pd.period_range("2025-03", "2025-12", freq="M")
+MAX_TRAIN = 200_000 if QUICK else 4_000_000
+N_ES = 100_000 if QUICK else 500_000
 OUT = REPORTS / ("rolling_quick.csv" if QUICK else "rolling_eval.csv")
 ensure_dirs()
 
-df = load("all")
-set_categories(df)
-FEATURES = feature_columns(df)
-print(f"Lest inn {len(df):,} rader, {df.date.min():%Y-%m-%d} - {df.date.max():%Y-%m-%d}. {ROUNDS} trær per modell.")
+con = duckdb.connect(str(DATA / "features.duckdb"))
+con.execute(f"SET temp_directory='{(DATA / 'tmp').as_posix()}'")
+if os.environ.get("DUCKDB_MEMORY_LIMIT"):
+    con.execute(f"SET memory_limit='{os.environ['DUCKDB_MEMORY_LIMIT']}'")
+if os.environ.get("DUCKDB_THREADS"):
+    con.execute(f"SET threads={int(os.environ['DUCKDB_THREADS'])}")
+
+PAST = build_past_monthly(con, [f"2025-{m:02d}-01" for m in range(1, 13)])
+EXCLUDE = "month, bucket, journey_id, stop_name, origin_name, dest_name"
+
+
+def fetch(where, prefix, hk, n=None, seed=0):
+    sample = f"USING SAMPLE reservoir({n} ROWS) REPEATABLE ({seed + 1})" if n else ""
+    q = f"""
+      SELECT c.* EXCLUDE ({EXCLUDE}), {feature_select('h')}, {baseline_select('b')}
+      FROM (SELECT * FROM (SELECT * FROM clean WHERE {where}) {sample}) c
+      {join_sql(prefix, hk, 'h')}
+      {join_sql(PAST, "date_trunc('month', c.date)::DATE", 'b')}"""
+    df = con.sql(q).df()
+    for col in CAT:
+        df[col] = df[col].astype("object")
+    return df
+
 
 done = pd.read_csv(OUT) if OUT.exists() else pd.DataFrame()
-if not done.empty and done.get("rounds", pd.Series([None])).iloc[0] != ROUNDS:
-    done = pd.DataFrame()              # andre innstillinger enn forrige kjøring - start på nytt
+if not done.empty and "early_stopping" not in done.columns:
+    done = pd.DataFrame()                       # gammelt format (fast antall trær) - start på nytt
 rows = done.to_dict("records")
 
 for m in MONTHS:
@@ -48,27 +71,42 @@ for m in MONTHS:
         print(f"{m}: allerede ferdig - hopper over")
         continue
     t0 = time.time()
-    past = df[df.date < m.start_time]
-    test = df[(df.date >= m.start_time) & (df.date <= m.end_time)]
-    train = past.sample(min(MAX_TRAIN, len(past)), random_state=0)
-    model = lgb.train(LGB_PARAMS, lgb.Dataset(train[FEATURES], train.y, categorical_feature=CAT),
-                      num_boost_round=ROUNDS)
+    m0 = m.start_time.strftime("%Y-%m-%d")
+    es = m - 1
+    tr_end = (es.start_time - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    prefix = build_oof(con, (m.start_time - pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
+    fold = "dayofyear(c.date) % 5"
+    train = fetch(f"bucket < 20 AND date BETWEEN DATE '2025-01-01' AND DATE '{tr_end}'", prefix, fold, MAX_TRAIN)
+    val = fetch(f"bucket < 25 AND date BETWEEN DATE '{es.start_time:%Y-%m-%d}' AND DATE '{es.end_time:%Y-%m-%d}'",
+                prefix, fold, N_ES)
+    test = fetch(f"bucket < 25 AND date BETWEEN DATE '{m0}' AND DATE '{m.end_time:%Y-%m-%d}'", prefix, "5")
+    for col in CAT:
+        cats = pd.Index(pd.concat([train[col], val[col], test[col]]).unique())
+        for d in (train, val, test):
+            d[col] = pd.Categorical(d[col], categories=cats)
+    feats = [c for c in train.columns if c not in ("y", "date", "baseline")]
+    dtr = lgb.Dataset(train[feats], train.y, categorical_feature=CAT)
+    model = lgb.train(LGB_PARAMS, dtr, num_boost_round=3000,
+                      valid_sets=[lgb.Dataset(val[feats], val.y, reference=dtr)],
+                      callbacks=[lgb.early_stopping(50, verbose=False)])
     y = test.y.to_numpy()
-    m_lgb = metrics(y, model.predict(test[FEATURES]))
+    m_lgb = metrics(y, model.predict(test[feats], num_iteration=model.best_iteration))
     m_b1 = metrics(y, test.baseline.to_numpy(dtype="float64"))
-    rows.append({"month": str(m), "rounds": ROUNDS, "n_train": len(train), "n_test": len(test),
-                 "mean_delay_s": float(y.mean()),
+    rows.append({"month": str(m), "early_stopping": True, "trees": model.best_iteration,
+                 "n_train": len(train), "n_test": len(test), "mean_delay_s": float(y.mean()),
                  "MAE_baseline": m_b1["MAE_s"], "MAE_lgbm": m_lgb["MAE_s"],
                  "RMSE_baseline": m_b1["RMSE_s"], "RMSE_lgbm": m_lgb["RMSE_s"]})
     pd.DataFrame(rows).to_csv(OUT, index=False)
-    print(f"{m}: baseline {m_b1['MAE_s']:.1f}s  LightGBM {m_lgb['MAE_s']:.1f}s  "
-          f"({(1 - m_lgb['MAE_s'] / m_b1['MAE_s']) * 100:+.1f} %)  [{time.time()-t0:.0f}s]", flush=True)
+    print(f"{m}: {model.best_iteration} trær, {len(train):,} treningsrader | baseline {m_b1['MAE_s']:.1f}s  "
+          f"LightGBM {m_lgb['MAE_s']:.1f}s ({(1 - m_lgb['MAE_s'] / m_b1['MAE_s']) * 100:+.1f} %)  "
+          f"[{time.time()-t0:.0f}s]", flush=True)
 
 res = pd.DataFrame(rows).sort_values("month")
 res["forbedring_%"] = (1 - res.MAE_lgbm / res.MAE_baseline) * 100
-print("\n" + res[["month", "mean_delay_s", "MAE_baseline", "MAE_lgbm", "forbedring_%"]].round(1).to_string(index=False))
+print("\n" + res[["month", "trees", "n_train", "MAE_baseline", "MAE_lgbm", "forbedring_%"]].round(1).to_string(index=False))
 tot = (1 - (res.MAE_lgbm * res.n_test).sum() / (res.MAE_baseline * res.n_test).sum()) * 100
-print(f"\nVektet over alle måneder: LightGBM {tot:+.1f} % lavere MAE enn baseline")
+print(f"\nVektet over alle måneder: LightGBM {tot:+.1f} % lavere MAE enn baseline; "
+      f"bedre i {(res.MAE_lgbm < res.MAE_baseline).sum()} av {len(res)} måneder")
 
 fig, ax = plt.subplots(figsize=(9, 4))
 x = np.arange(len(res))
