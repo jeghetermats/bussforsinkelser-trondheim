@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from data import (COLOR_ACTUAL, COLOR_BASELINE, COLOR_MODEL, fmt_clock, fmt_date, fmt_delay,
-                  load_importance, load_metrics, load_predictions, load_rolling, load_trips)
+                  load_importance, load_metrics, load_oracle, load_predictions, load_rolling, load_trips)
 
 st.set_page_config(page_title="Bussforsinkelser i Trondheim", page_icon=":material/directions_bus:",
                    layout="wide")
@@ -44,10 +44,12 @@ df = load_predictions()
 trips = load_trips()
 metrics = load_metrics()
 rolling = load_rolling()
+oracle = load_oracle()
 importance = load_importance()
 
 B1 = "Baseline 1 - historisk median per linje/stopp/time/dagtype"
 lgbm, base = metrics["LightGBM"], metrics[B1]
+ci = metrics.get("_info", {}).get("mae_forbedring_mot_baseline")
 
 # ================= Topp =================
 st.title("Bussforsinkelser i Trondheim")
@@ -60,7 +62,10 @@ st.write(
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Gjennomsnittlig feil (MAE)", f"{lgbm['MAE_s']:.0f} s",
           delta=f"{(lgbm['MAE_s'] / base['MAE_s'] - 1) * 100:+.1f} % mot baseline",
-          delta_color="inverse", border=True, help="Gjennomsnittlig avvik fra faktisk forsinkelse.")
+          delta_color="inverse", border=True,
+          help="Gjennomsnittlig avvik fra faktisk forsinkelse. " + (
+              f"95 % KI for forbedringen: {ci['ci95_lav_%']:.1f}-{ci['ci95_høy_%']:.1f} % (bootstrap over dager)."
+              if ci else ""))
 k2.metric("Store bom (RMSE)", f"{lgbm['RMSE_s']:.0f} s",
           delta=f"{(lgbm['RMSE_s'] / base['RMSE_s'] - 1) * 100:+.1f} % mot baseline",
           delta_color="inverse", border=True, help="RMSE straffer store feil ekstra hardt.")
@@ -70,7 +75,7 @@ if rolling is not None:
     wins = int((rolling.MAE_lgbm < rolling.MAE_baseline).sum())
     k4.metric("Slår baselinen", f"{wins} av {len(rolling)} måneder", delta="rullende test 2025",
               delta_color="off", delta_arrow="off", border=True,
-              help="Hver måned feb-des 2025 testet med en modell trent bare på tidligere måneder.")
+              help="Hver måned mars-des 2025 testet med en modell trent bare på tidligere måneder.")
 
 # ================= Utforsk en tur: kontroller til venstre, graf til høyre =================
 st.subheader("Utforsk en tur fra testperioden")
@@ -219,8 +224,35 @@ with b:
                 tooltip=[alt.Tooltip("month:N", title="Måned"), alt.Tooltip("serie:N", title="Modell"),
                          alt.Tooltip("mae:Q", title="MAE (s)", format=".1f")],
             ), width="stretch")
-            st.caption("Hver måned feb-des er testet med en modell trent bare på tidligere måneder. Januar mangler "
-                       "fordi det ikke finnes treningsmåneder før den. Y-aksen starter ikke på 0.")
+            st.caption("Hver måned mars-des er testet med en modell trent bare på tidligere måneder, med early "
+                       "stopping på måneden før. Gevinsten varierer: størst om vinteren, rundt 1 % i en typisk måned. "
+                       "Y-aksen starter ikke på 0.")
+
+if oracle is not None:
+    with st.container(border=True):
+        card_title("Hvor mye er mulig før avgang?")
+        o = oracle.rename(columns={"MAE_baseline": "Historisk median", "MAE_lightgbm": "LightGBM"})
+        ol = o.melt(id_vars="kunnskap", var_name="serie", value_name="mae")
+        st.altair_chart(
+            alt.Chart(ol).mark_bar(cornerRadiusEnd=3)
+            .encode(
+                y=alt.Y("kunnskap:N", sort=o["kunnskap"].tolist(), title=None, axis=alt.Axis(labelLimit=320)),
+                yOffset=alt.YOffset("serie:N", sort=["Historisk median", "LightGBM"]),
+                x=alt.X("mae:Q", title="Gjennomsnittlig feil (sekunder)"),
+                color=alt.Color("serie:N", title=None, legend=alt.Legend(orient="top"),
+                                scale=alt.Scale(domain=["Historisk median", "LightGBM"],
+                                                range=[COLOR_BASELINE, COLOR_MODEL])),
+                tooltip=[alt.Tooltip("kunnskap:N", title="Oraklet vet"), alt.Tooltip("serie:N", title="Modell"),
+                         alt.Tooltip("mae:Q", title="MAE (s)", format=".1f")],
+            )
+            .properties(height=260),
+            width="stretch",
+        )
+        st.caption(
+            "Et 'orakel' får vite medianfeilen for sin gruppe på selve dagen - noe som først er kjent i ettertid, "
+            "så dette er øvre grenser. Informasjon på dagsnivå (vær, hendelser) er verdt lite. Det store potensialet "
+            "ligger i forsinkelsen på samme linje de siste timene - kjent i sanntid rett før avgang, ikke dager i forveien."
+        )
 
 c, e = st.columns(2)
 with c:
@@ -250,8 +282,9 @@ with c:
 - **Kun informasjon kjent før avgang:** linje, stopp, retning, rutetid, kalender, dagslys og vær.
   Forsinkelse ved forrige stopp er bevisst utelatt - den ville gjort oppgaven triviell.
 - **Tidsbasert splitt:** trening jan-aug 2025, validering sep-okt, test nov-des 2025.
-- **Historiske features og baseline** bygges fra alle ~43 mill. stoppanløp, men bare fra data før radens måned
-  (oppdatert månedlig) - slik en ekte tjeneste ville hatt dem.
+- **Historiske features** bygges fra alle ~43 mill. stoppanløp. Treningsrader får *fold-historikk* (aldri sin
+  egen fasit); test- og valideringsrader ser bare fortiden. Oppsettet ble valgt over mars-okt, ikke på testen.
+- **Baseline:** historisk median fra alle rader før radens måned, oppdatert månedlig.
 - **LightGBM med L1-tap**, som treffer medianen og minimerer gjennomsnittlig absolutt feil.
 """
         )
@@ -295,6 +328,7 @@ with e:
             """
 - Før avgang er mye av forsinkelsen tilfeldig, så forbedringen over en god historisk regel er moderat.
 - Værdata er målt vær, ikke værvarsel - en ekte tjeneste måtte brukt varsel.
+- Innenfor +/-1 minutt treffer baselinen litt oftere (49,3 % mot 47,9 %); modellens styrke er færre store bom.
 - Svakere enn baselinen på nattbusser kl. 01-04, der det er få observasjoner.
 """
         )

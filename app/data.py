@@ -87,3 +87,9 @@ def load_rolling() -> pd.DataFrame | None:
 def load_importance() -> pd.DataFrame | None:
     p = _find("feature_importance.csv")
     return pd.read_csv(p) if p.exists() else None
+
+
+@st.cache_data
+def load_oracle() -> pd.DataFrame | None:
+    p = _find("oracle.csv")
+    return pd.read_csv(p) if p.exists() else None
