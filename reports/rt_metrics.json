@@ -1,0 +1,114 @@
+{
+  "quick_mode": false,
+  "test_periode": "2025-11-01 - 2025-12-31",
+  "n_test_per_lead": 1703376,
+  "best_iter": 792,
+  "valid_MAE_s": 92.36338353511546,
+  "regel_k": 0.2,
+  "regel_m": 1.0892857313156128,
+  "bootstrap": {
+    "10": {
+      "B_mot_baseline": {
+        "forbedring_%": 6.237841295345747,
+        "ci95_lav_%": 5.325641644823587,
+        "ci95_høy_%": 7.125390704532886,
+        "dager": 61
+      },
+      "B_mot_A": {
+        "forbedring_%": 2.664228316289652,
+        "ci95_lav_%": 1.8365072069611001,
+        "ci95_høy_%": 3.637937883057766,
+        "dager": 61
+      },
+      "B_mot_regel": {
+        "forbedring_%": 4.1052012958053385,
+        "ci95_lav_%": 3.291534776938788,
+        "ci95_høy_%": 4.811425060379556,
+        "dager": 61
+      }
+    },
+    "30": {
+      "B_mot_baseline": {
+        "forbedring_%": 6.323185720345082,
+        "ci95_lav_%": 5.443212264979808,
+        "ci95_høy_%": 7.177932263775724,
+        "dager": 61
+      },
+      "B_mot_A": {
+        "forbedring_%": 2.752825524171565,
+        "ci95_lav_%": 1.9582571262422281,
+        "ci95_høy_%": 3.6938199331683754,
+        "dager": 61
+      },
+      "B_mot_regel": {
+        "forbedring_%": 4.203389053665307,
+        "ci95_lav_%": 3.410936821174552,
+        "ci95_høy_%": 4.913226799994746,
+        "dager": 61
+      }
+    },
+    "60": {
+      "B_mot_baseline": {
+        "forbedring_%": 6.028318289642276,
+        "ci95_lav_%": 5.134218186668519,
+        "ci95_høy_%": 6.898750889098938,
+        "dager": 61
+      },
+      "B_mot_A": {
+        "forbedring_%": 2.4467196355234755,
+        "ci95_lav_%": 1.6708857655912668,
+        "ci95_høy_%": 3.386359275309389,
+        "dager": 61
+      },
+      "B_mot_regel": {
+        "forbedring_%": 4.327558431948331,
+        "ci95_lav_%": 3.4951336815476712,
+        "ci95_høy_%": 5.05372917034283,
+        "dager": 61
+      }
+    }
+  },
+  "features": [
+    "line",
+    "stop",
+    "direction",
+    "seq",
+    "n_stops",
+    "route_frac",
+    "sched_min_from_start",
+    "trip_start_min",
+    "minute_of_day",
+    "hour",
+    "weekday",
+    "is_holiday",
+    "daytype",
+    "is_school_break",
+    "daylight_h",
+    "temp",
+    "precip",
+    "snowfall",
+    "snow_depth",
+    "wind",
+    "precip_3h",
+    "hist_med_lsdhd",
+    "hist_mean_lsd",
+    "hist_std_lsd",
+    "hist_mean_lhd",
+    "hist_mean_sh",
+    "lead_min",
+    "horizon_min",
+    "rt_stop_n60",
+    "rt_stop_anom60",
+    "rt_ld_n20",
+    "rt_ld_anom20",
+    "rt_ld_n60",
+    "rt_ld_anom60",
+    "rt_ld_n180",
+    "rt_ld_anom180",
+    "rt_net_n15",
+    "rt_net_anom15",
+    "rt_net_anom60",
+    "rt_ld_last_anom",
+    "rt_ld_last_age_min"
+  ]
+}
