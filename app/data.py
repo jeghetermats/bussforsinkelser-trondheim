@@ -93,3 +93,22 @@ def load_importance() -> pd.DataFrame | None:
 def load_oracle() -> pd.DataFrame | None:
     p = _find("oracle.csv")
     return pd.read_csv(p) if p.exists() else None
+
+
+@st.cache_data(show_spinner="Laster sanntidsprognoser ...")
+def load_rt_predictions() -> pd.DataFrame | None:
+    """Modell B: én rad per (tur, stopp, lead). Kolonner trip, seq, lead_min, pred_rt, pred_rule."""
+    p = _find("rt_test_predictions.parquet")
+    return pd.read_parquet(p, columns=["trip", "seq", "lead_min", "pred_rt"]) if p.exists() else None
+
+
+@st.cache_data
+def load_rt_results() -> pd.DataFrame | None:
+    p = _find("rt_results.csv")
+    return pd.read_csv(p) if p.exists() else None
+
+
+@st.cache_data
+def load_rt_metrics() -> dict | None:
+    p = _find("rt_metrics.json")
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
