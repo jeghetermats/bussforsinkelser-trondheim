@@ -18,6 +18,13 @@ Features (alle beregnet på p - BUFFER_MIN):
   per stopp         : antall obs og snittavvik siste 60 min (alle linjer, samme stopp)
   hele nettet       : antall obs siste 15 min, snittavvik siste 15/60 min
   lead_min, horizon_min (= lead + planlagte minutter fra turstart til stoppet)
+Runde 2 - knyttet til hvor på ruten og hvilken buss:
+  forrige buss      : avvik for siste buss på samme linje+retning ved SAMME stopp, og hvor lenge siden
+  strekninger       : vekst i avvik per strekning (stopp k-1 -> k, alle linjer) siste 30/90 min,
+                      summert langs turen fra første stopp til stopp k (rt_segcum*), og andel dekket
+  innkommende buss  : siste planlagte tur på samme linje som ender ved turens startholdeplass (navn) før avgang
+                      (sannsynligvis bussen som kjører turen): planlagt pause, siste kjente forsinkelse,
+                      hvor langt den har kommet og pausen som er igjen etter forsinkelsen
 
 Utvalg og historikk er de samme som i features.py (samme turer, samme fold-historikk).
 Trening/valid: én tilfeldig lead per tur (5-90 min, fast hash). Test: hver rad med lead 10, 30 og 60.
@@ -39,6 +46,7 @@ from history import baseline_select, feature_select, join_sql
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 
+IN_MAX_GAP = 90                     # innkommende buss: maks planlagt pause (min) før vi regner den som ukjent
 BUFFER_MIN = 2                      # rapporteringsforsinkelse vi antar i sanntidsstrømmen
 TEST_LEADS = [10, 30, 60]
 LEAD_MIN, LEAD_MAX = 5, 90          # lead-intervall for trening/valid
@@ -87,20 +95,27 @@ if (ROOT / "atb_2025.parquet").exists():
 raw_sql = "read_parquet([" + ", ".join(f"'{p.as_posix()}'" for p in raw_files) + "], union_by_name=true)"
 con.execute(f"""
 CREATE OR REPLACE TABLE trip_ts AS
-SELECT journey_id, min(aimed_arrival_local)::TIMESTAMP AS trip_start_ts
+SELECT journey_id, any_value(lineRef) AS line,
+       min(aimed_arrival_local)::TIMESTAMP AS trip_start_ts, max(aimed_arrival_local)::TIMESTAMP AS trip_end_ts,
+       arg_min(stopPointName, seq) AS origin_name, arg_max(stopPointName, seq) AS dest_name, max(seq) AS n_stops
 FROM {raw_sql} WHERE {date_filter('operatingDate')} GROUP BY journey_id
 """)
 con.execute(f"""
 CREATE OR REPLACE TABLE obs AS
-SELECT line, direction, stop,
+SELECT *, greatest(-300, least(600, anom - lag(anom) OVER j))::FLOAT AS growth,
+       lag(stop) OVER j AS prev_stop
+FROM (
+SELECT journey_id, seq, line, direction, stop, y,
        trip_start_ts + to_seconds(CAST(round(sched_min_from_start * 60) AS BIGINT) + y) AS obs_ts,
        greatest(-600, least(900, y - baseline))::FLOAT AS anom
 FROM (
-  SELECT c.line, c.direction, c.stop, c.sched_min_from_start, c.y, t.trip_start_ts, {baseline_select('b')}
+  SELECT c.journey_id, c.seq, c.line, c.direction, c.stop, c.sched_min_from_start, c.y, t.trip_start_ts,
+         {baseline_select('b')}
   FROM f.clean c JOIN trip_ts t USING (journey_id)
   {join_sql(PAST, MONTH, 'b')}
   WHERE {date_filter('c.date')}
 )
+) WINDOW j AS (PARTITION BY journey_id ORDER BY seq)
 """)
 log(f"Observasjoner: {con.sql('SELECT count(*) FROM obs').fetchone()[0]:,}", t0)
 
@@ -108,9 +123,10 @@ log(f"Observasjoner: {con.sql('SELECT count(*) FROM obs').fetchone()[0]:,}", t0)
 # cum-tabellene har én rad per (nøkkel, bøtteslutt t) med løpende summer. Summen i vinduet (T-W, T]
 # er cum(T) - cum(T-W), som slås opp med ASOF JOIN (siste bøtte med t <= tidspunktet).
 t0 = time.time()
-for name, keys, minutes in [("cum_ld", ["line", "direction"], 5),
-                            ("cum_stop", ["stop"], 15),
-                            ("cum_net", [], 5)]:
+for name, keys, minutes, val in [("cum_ld", ["line", "direction"], 5, "anom"),
+                                 ("cum_stop", ["stop"], 15, "anom"),
+                                 ("cum_net", [], 5, "anom"),
+                                 ("cum_seg", ["prev_stop", "stop"], 5, "growth")]:
     ks = ", ".join(keys)
     part = f"PARTITION BY {ks} " if keys else ""
     con.execute(f"""
@@ -118,14 +134,17 @@ for name, keys, minutes in [("cum_ld", ["line", "direction"], 5),
     WITH b AS (
       SELECT {ks + ', ' if keys else ''}
              time_bucket(INTERVAL {minutes} MINUTE, obs_ts) + INTERVAL {minutes} MINUTE AS t,
-             count(*) AS n, count(anom) AS na, sum(anom) AS sa
-      FROM obs GROUP BY ALL
+             count(*) AS n, count({val}) AS na, sum({val}) AS sa
+      FROM obs {"WHERE prev_stop IS NOT NULL" if name == "cum_seg" else ""} GROUP BY ALL
     )
     SELECT {ks + ', ' if keys else ''} t,
            sum(n) OVER w AS cn, sum(na) OVER w AS cna, sum(sa) OVER w AS csa
     FROM b WINDOW w AS ({part}ORDER BY t ROWS UNBOUNDED PRECEDING)
     """)
 con.execute("CREATE OR REPLACE TABLE obs_ld AS SELECT line, direction, obs_ts, anom FROM obs WHERE anom IS NOT NULL")
+con.execute("CREATE OR REPLACE TABLE obs_stop AS "
+            "SELECT line, direction, stop, obs_ts, anom FROM obs WHERE anom IS NOT NULL")
+con.execute("CREATE OR REPLACE TABLE obs_j AS SELECT journey_id, obs_ts, y, seq FROM obs")
 log("Kumulative tabeller ferdig", t0)
 
 
@@ -173,7 +192,9 @@ for split in RUN_SPLITS:
     CREATE OR REPLACE TEMP TABLE q AS
     SELECT c.* EXCLUDE ({EXCLUDE}), {', '.join(cols)}, c.journey_id,
            {lead_col} AS lead_min,
-           t.trip_start_ts - to_minutes({lead_col} + {BUFFER_MIN}) AS T
+           t.trip_start_ts - to_minutes({lead_col} + {BUFFER_MIN}) AS T,
+           t.trip_start_ts, t.origin_name AS origin_stopname,
+           lag(c.stop) OVER (PARTITION BY c.journey_id, {lead_col} ORDER BY c.seq) AS prev_stop
     FROM f.clean c
     JOIN trip_ts t USING (journey_id)
     {lead_sql}
@@ -185,27 +206,63 @@ for split in RUN_SPLITS:
     j_net, c_net = window_feats("cum_net", "tr", [], [15, 60], "net")
     c_net = c_net.replace("rt_net_n60", "rt_net_n60_unused")   # antall siste 15 min holder
     con.execute(f"""
-    CREATE OR REPLACE TEMP TABLE trip_feats AS
-    SELECT tr.journey_id, tr.lead_min, {c_ld}, {c_net},
+    CREATE OR REPLACE TEMP TABLE trip_feats0 AS
+    SELECT tr.journey_id, tr.lead_min, tr.T, tr.trip_start_ts, {c_ld}, {c_net},
            last.anom AS rt_ld_last_anom,
-           (date_diff('second', last.obs_ts, tr.T) / 60.0)::FLOAT AS rt_ld_last_age_min
-    FROM (SELECT DISTINCT journey_id, lead_min, line, direction, T FROM q) tr
+           (date_diff('second', last.obs_ts, tr.T) / 60.0)::FLOAT AS rt_ld_last_age_min,
+           inc.journey_id AS in_journey, inc.trip_end_ts AS in_end, inc.n_stops AS in_n_stops
+    FROM (SELECT DISTINCT journey_id, lead_min, line, direction, T, trip_start_ts, origin_stopname FROM q) tr
     {j_ld}
     {j_net}
     ASOF LEFT JOIN obs_ld last ON last.line = tr.line AND last.direction = tr.direction AND last.obs_ts <= tr.T
+    ASOF LEFT JOIN trip_ts inc ON inc.line = tr.line AND inc.dest_name = tr.origin_stopname
+                               AND inc.trip_end_ts < tr.trip_start_ts
+    """)
+    # Innkommende buss: siste kjente forsinkelse før T
+    con.execute(f"""
+    CREATE OR REPLACE TEMP TABLE trip_feats AS
+    SELECT tf.* EXCLUDE (T, trip_start_ts, in_journey, in_end, in_n_stops),
+           (date_diff('second', tf.in_end, tf.trip_start_ts) / 60.0)::FLOAT AS rt_in_gap_min,
+           o.y::FLOAT AS rt_in_delay,
+           (date_diff('second', o.obs_ts, tf.T) / 60.0)::FLOAT AS rt_in_age_min,
+           (o.seq / tf.in_n_stops::DOUBLE)::FLOAT AS rt_in_progress,
+           (date_diff('second', tf.in_end, tf.trip_start_ts) / 60.0 - o.y / 60.0)::FLOAT AS rt_in_slack_min
+    FROM (SELECT * REPLACE (CASE WHEN date_diff('minute', in_end, trip_start_ts) <= {IN_MAX_GAP}
+                                 THEN in_journey END AS in_journey,
+                            CASE WHEN date_diff('minute', in_end, trip_start_ts) <= {IN_MAX_GAP}
+                                 THEN in_end END AS in_end)
+          FROM trip_feats0) tf
+    ASOF LEFT JOIN obs_j o ON o.journey_id = tf.in_journey AND o.obs_ts <= tf.T
     """)
     # 3c. Features per stopp (alle linjer) og ferdig datasett
     j_st, c_st = window_feats("cum_stop", "q", ["stop"], [60], "stop")
-    keep_ids = "q.journey_id, " if split == "test" else ""
+    j_sg, c_sg = window_feats("cum_seg", "q", ["prev_stop", "stop"], [30, 90], "seg")
+    con.execute(f"""
+    CREATE OR REPLACE TEMP TABLE r AS
+    SELECT q.*, {c_st}, {c_sg},
+           prev.anom AS rt_prev_anom,
+           (date_diff('second', prev.obs_ts, q.T) / 60.0)::FLOAT AS rt_prev_age_min
+    FROM q
+    {j_st}
+    {j_sg}
+    ASOF LEFT JOIN obs_stop prev ON prev.line = q.line AND prev.direction = q.direction
+                                 AND prev.stop = q.stop AND prev.obs_ts <= q.T
+    """)
+    keep_ids = "r.journey_id, " if split == "test" else ""
     out = DATA / f"rt_{split}.parquet"
+    seg_cum = ", ".join(
+        f"sum(coalesce(r.rt_seg_anom{w}, 0)) OVER tw ::FLOAT AS rt_segcum{w}, "
+        f"avg((r.rt_seg_n{w} > 0)::INT) OVER tw ::FLOAT AS rt_segcov{w}" for w in (30, 90))
     con.execute(f"""
     COPY (
-      SELECT q.* EXCLUDE (journey_id, T), {keep_ids}
-             (q.lead_min + q.sched_min_from_start)::FLOAT AS horizon_min,
-             {c_st}, tf.* EXCLUDE (journey_id, lead_min, rt_net_n60_unused)
-      FROM q
-      {j_st}
-      JOIN trip_feats tf ON tf.journey_id = q.journey_id AND tf.lead_min = q.lead_min
+      SELECT r.* EXCLUDE (journey_id, T, trip_start_ts, origin_stopname, prev_stop), {keep_ids}
+             (r.lead_min + r.sched_min_from_start)::FLOAT AS horizon_min,
+             {seg_cum},
+             tf.* EXCLUDE (journey_id, lead_min, rt_net_n60_unused)
+      FROM r
+      JOIN trip_feats tf ON tf.journey_id = r.journey_id AND tf.lead_min = r.lead_min
+      WINDOW tw AS (PARTITION BY r.journey_id, r.lead_min ORDER BY r.seq ROWS UNBOUNDED PRECEDING)
+      ORDER BY r.date, r.journey_id, r.lead_min, r.seq          -- fast rekkefølge mellom kjøringer
     ) TO '{out.as_posix()}' (FORMAT PARQUET)
     """)
     n = con.sql(f"SELECT count(*) FROM '{out.as_posix()}'").fetchone()[0]
