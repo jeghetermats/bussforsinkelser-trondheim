@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from data import (COLOR_ACTUAL, COLOR_BASELINE, COLOR_MODEL, fmt_clock, fmt_date, fmt_delay,
-                  load_importance, load_metrics, load_oracle, load_predictions, load_rolling, load_rt_metrics,
+                  load_importance, load_metrics, load_oracle, load_predictions, load_rolling, load_final, load_rt_metrics,
                   load_rt_predictions, load_rt_results, load_trips)
 
 st.set_page_config(page_title="Bussforsinkelser i Trondheim", page_icon=":material/directions_bus:",
@@ -58,10 +58,13 @@ rt_meta = load_rt_metrics()
 B1 = "Baseline 1 - historisk median per linje/stopp/time/dagtype"
 lgbm, base = metrics["LightGBM"], metrics[B1]
 ci = metrics.get("_info", {}).get("mae_forbedring_mot_baseline")
-has_rt = rt_pred is not None and rt_res is not None and rt_meta is not None
+final = load_final()
+if final is not None:   # endelig modell A: snitt av 3 seeds + blanding med baselinen
+    lgbm, base, ci = final["A"]["metrics"], final["A"]["metrics_baseline"], final["A"]["mot_baseline"]
+has_rt = rt_pred is not None and rt_res is not None and final is not None
 if has_rt:
-    rt30 = rt_res[(rt_res.lead_min == 30) & (rt_res.metode == "Modell B (sanntid)")].iloc[0]
-    ci30 = rt_meta["bootstrap"]["30"]
+    rt30 = final["B"]["30"]["metrics"]
+    ci30 = {"B_mot_baseline": final["B"]["30"]["mot_baseline"], "B_mot_A": final["B"]["30"]["mot_A"]}
 
 # ================= Topp =================
 st.title("Bussforsinkelser i Trondheim")
@@ -101,7 +104,8 @@ if rolling is not None:
     wins = int((rolling.MAE_lgbm < rolling.MAE_baseline).sum())
     k4.metric("Modell A slår baselinen", f"{wins} av {len(rolling)} måneder", delta="rullende test 2025",
               delta_color="off", delta_arrow="off", border=True,
-              help="Hver måned mars-des 2025 testet med en modell trent bare på tidligere måneder.")
+              help="Hver måned mars-des 2025 testet med en modell trent bare på tidligere måneder "
+                   "(én seed, uten blanding).")
 
 # ================= Utforsk en tur: kontroller til venstre, graf til høyre =================
 st.subheader("Utforsk en tur fra testperioden")
@@ -267,8 +271,8 @@ with b:
                          alt.Tooltip("mae:Q", title="MAE (s)", format=".1f")],
             ), width="stretch")
             st.caption("Hver måned mars-des er testet med en modell trent bare på tidligere måneder, med early "
-                       "stopping på måneden før. Gevinsten varierer: størst om vinteren, rundt 1 % i en typisk måned. "
-                       "Y-aksen starter ikke på 0.")
+                       "stopping på måneden før (enkeltmodell A). Gevinsten varierer: størst om vinteren, rundt 1 % i en "
+                       "typisk måned. Y-aksen starter ikke på 0.")
 
 st.subheader("Hva hjelper å vite rett før avgang?")
 o_col, rt_col = st.columns(2)
@@ -306,6 +310,7 @@ if has_rt:
         labels = {"Baseline": "Historisk median", "Modell A (før dagen)": "Modell A (dagen før)",
                   "Baseline + avvik siste time": "Median + linjens avvik", "Modell B (sanntid)": "Modell B (sanntid)"}
         rr = rt_res[rt_res.metode.isin(order)].copy()
+        rr.loc[rr.metode == "Modell A (før dagen)", "MAE_s"] = lgbm["MAE_s"]   # endelig A (samme for alle lead)
         rr["serie"] = rr.metode.map(labels)
         rr["når"] = rr.lead_min.map(lambda m: f"{m} min før")
         st.altair_chart(
@@ -324,14 +329,14 @@ if has_rt:
             .properties(height=300),
             width="stretch",
         )
-        b30 = rt_meta["bootstrap"]["30"]
+        b30 = ci30["B_mot_A"]
         st.caption(
-            f"Modell B bruker hvordan linjen, stoppet og hele nettet har gått de siste timene. 30 min før avgang "
-            f"bommer den {b30['B_mot_A']['forbedring_%']:.1f} % mindre enn modell A "
-            f"(95 % KI {b30['B_mot_A']['ci95_lav_%']:.1f}-{b30['B_mot_A']['ci95_høy_%']:.1f} %). En kontroll "
-            "trent likt, men uten sanntidsfeatures, havnet på samme nivå som modell A - gevinsten kommer fra "
-            "sanntidsdataene. Nesten like stor 60 som 10 min før: signalet er hvordan dagen går, ikke siste minutt. "
-            "X-aksen starter ikke på 0."
+            f"Modell B bruker hvordan linjen, stoppet og nettet har gått de siste timene, forrige buss ved samme "
+            f"stopp, forsinkelsesveksten på strekningene videre og bussen som skal kjøre turen. 30 min før avgang "
+            f"bommer den {b30['forbedring_%']:.1f} % mindre enn modell A (95 % KI {b30['ci95_lav_%']:.1f}-"
+            f"{b30['ci95_høy_%']:.1f} %). En kontroll trent likt, men uten sanntidsfeatures, havnet på nivå med A - "
+            "gevinsten kommer fra sanntidsdataene. Den er størst på de første stoppene ved kort lead, men mesteparten "
+            "av signalet er hvordan dagen går. X-aksen starter ikke på 0."
         )
 
 c, e = st.columns(2)
@@ -341,7 +346,7 @@ with c:
         rows = [("Global median", metrics["Baseline 0 - global median"]), ("Historisk median", base),
                 ("Modell A (dagen før)", lgbm)]
         if has_rt:
-            rows.append(("Modell B (30 min før)", rt30.to_dict()))
+            rows.append(("Modell B (30 min før)", rt30))
         st.dataframe(
             pd.DataFrame([{"Modell": n, "MAE (s)": m["MAE_s"], "RMSE (s)": m["RMSE_s"],
                            "Innen +/-1 min": m["innen_1min_%"], "Innen +/-2 min": m["innen_2min_%"]}
@@ -367,9 +372,11 @@ with c:
 - **Historiske features** bygges fra alle ~43 mill. stoppanløp. Treningsrader får *fold-historikk* (aldri sin
   egen fasit); test- og valideringsrader ser bare fortiden. Oppsettet ble valgt over mars-okt, ikke på testen.
 - **Baseline:** historisk median fra alle rader før radens måned, oppdatert månedlig.
-- **LightGBM med L1-tap**, som treffer medianen og minimerer gjennomsnittlig absolutt feil.
-- **Modell B** får i tillegg avviket fra baselinen på samme linje og retning (siste 20/60/180 min), på samme
-  stopp og i hele nettet - bare ankomster registrert minst 2 min før prognosen lages. Samme turer og protokoll.
+- **LightGBM med L1-tap**, som treffer medianen og minimerer gjennomsnittlig absolutt feil. Snitt av tre
+  seeds; modell A blandes i tillegg litt med baselinen (vekt 0,85, valgt på sep-okt).
+- **Modell B** får i tillegg sanntid fram til 2 min før prognosen: avvik fra baselinen på linjen, ved stoppet og i
+  nettet, forrige buss ved samme stopp, forsinkelsesvekst per strekning summert fram til stoppet, og bussen som
+  kommer inn til startholdeplassen. Featurene ble valgt på sep-okt; å trene på avviket og roligere læring hjalp ikke.
 """
         )
 
@@ -414,8 +421,10 @@ with e:
 - Sanntidsdataene er de endelige registrerte tidene. Den ekte strømmen kan komme senere eller bli rettet,
   derav bufferen på 2 min.
 - Værdata er målt vær, ikke værvarsel - en ekte tjeneste måtte brukt varsel.
-- Innenfor +/-1 minutt treffer baselinen litt oftere (49,3 % mot 47,9 % for A og 49,0 % for B); modellenes
-  styrke er færre store bom.
+- Innenfor +/-1 minutt treffer baselinen litt oftere enn modell A (49,3 % mot 48,6 %); B treffer oftest
+  (50,1 %). Modellenes største styrke er færre store bom.
+- Den innkommende bussen finnes bare for ~10 % av turene (samme linje, samme holdeplassnavn); busser som bytter
+  linje på endeholdeplassen er ikke med.
 - Svakere enn baselinen på nattbusser kl. 01-04, der det er få observasjoner.
 """
         )

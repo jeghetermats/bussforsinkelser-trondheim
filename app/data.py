@@ -112,3 +112,10 @@ def load_rt_results() -> pd.DataFrame | None:
 def load_rt_metrics() -> dict | None:
     p = _find("rt_metrics.json")
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+@st.cache_data
+def load_final() -> dict | None:
+    """Endelige modeller (src/finalize.py): A = seed-snitt + blanding, B = runde 2 + seed-snitt."""
+    p = _find("final.json")
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
