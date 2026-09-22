@@ -1,0 +1,49 @@
+{
+  "andel_over_3min_test_%": 32.72624482204751,
+  "klassifisering": {
+    "Historisk median": {
+      "AUC": 0.7717782109068217,
+      "Brier": 0.17465705434155612,
+      "Brier_skill_mot_andel": 0.21088332521971376
+    },
+    "Modell A": {
+      "AUC": 0.7943264630186331,
+      "Brier": 0.1655699799003611,
+      "Brier_skill_mot_andel": 0.2519395653672988
+    },
+    "Modell B": {
+      "AUC": 0.8145403420992315,
+      "Brier": 0.1579039873361959,
+      "Brier_skill_mot_andel": 0.286575226571652
+    },
+    "_Brier_bare_andel": 0.22133235796871975
+  },
+  "intervaller": {
+    "Historisk median": {
+      "dekning_%": 78.35058143357662,
+      "median_bredde_s": 273.0,
+      "dekning_nov_%": 78.21015717810472,
+      "dekning_des_%": 78.49906272948634
+    },
+    "Modell A": {
+      "dekning_%": 78.55118306234208,
+      "median_bredde_s": 264.4011822509765,
+      "dekning_nov_%": 79.03442840171799,
+      "dekning_des_%": 78.04021083755266
+    },
+    "Modell B": {
+      "dekning_%": 79.44164999389449,
+      "median_bredde_s": 262.51195068359374,
+      "dekning_nov_%": 79.73544731792013,
+      "dekning_des_%": 79.13099563251265
+    }
+  },
+  "verste_10_dager": {
+    "A_mot_baseline_%": 5.7063511610343625,
+    "B_mot_baseline_%": 10.87297835776364,
+    "øvrige_A_%": 2.8574275666195414,
+    "øvrige_B_%": 6.627513310747357
+  },
+  "dager_B_bedre_enn_A": 60,
+  "dager": 61
+}
