@@ -104,6 +104,28 @@ Runde 2 ble valgt på sep-okt (`src/select_rt.py`, 2 seeds): 0,71 % [0,56-0,86] 
 på avviket y - baseline eller med roligere læring hjalp ikke og ble forkastet. For B finnes ingen
 måned-for-måned-kjøring over mars-okt, så valget er tatt bare på sep-okt.
 
+## Mer enn MAE
+
+`src/evaluate_extra.py`, test nov-des, modell B 30 min før avgang. Alle kalibreringer er gjort på sep-okt.
+
+![Kalibrering og feil per dag](reports/eval_extra.png)
+
+"Blir bussen mer enn 3 min forsinket?" (32,7 % av målingene i testen). Prognosen gjøres om til en
+sannsynlighet med logistisk regresjon på valid.
+
+| | AUC | Brier | Brier-skill mot bare andelen |
+|---|---|---|---|
+| Historisk median | 0,772 | 0,175 | 0,21 |
+| Modell A | 0,794 | 0,166 | 0,25 |
+| Modell B | 0,815 | 0,158 | 0,29 |
+
+80 %-prediksjonsintervaller (10.-90. persentil av feilen på valid) dekker 78-79 % av testen, stabilt i november
+og desember, med median bredde ~265 s: +/- over to minutter er den ærlige usikkerheten før avgang.
+
+De ti dagene der baselinen bommet mest, er nesten alle i andre halvdel av november, med lite
+nedbør og snø. Været forklarer dem altså ikke. Det er her modellene tjener mest: A er 5,7 % og B 10,9 % bedre
+enn baselinen disse dagene, mot 2,9 % og 6,6 % de øvrige dagene. B er bedre enn A på 60 av 61 dager.
+
 ## Oppsett
 
 - Mål: ankomstforsinkelse i sekunder ved hvert stopp (faktisk minus planlagt ankomst).
@@ -160,6 +182,7 @@ python src/train_rt.py            # modell B: 3 seeds + test per lead (--no-rt =
 python src/finalize.py            # endelige tall (reports/final.json) og A-prognosene til appen
 python src/oracle.py              # orakel-analyse (etter finalize)
 python src/rt_breakdown.py        # B mot A per lead og posisjon på ruten
+python src/evaluate_extra.py      # > 3 min (AUC/Brier), 80 %-intervaller, verste dager
 python src/ablation.py            # ablasjon (valgfritt, flere timer)
 python src/ablation.py --cv --seeds 0,1   # valg av oppsett over mars-okt (valgfritt)
 ```
@@ -176,7 +199,7 @@ python src/ablation.py --cv --seeds 0,1   # valg av oppsett over mars-okt (valgf
 ## Videre arbeid
 
 - Måned-for-måned-valg over mars-okt også for modell B.
-- Evaluering av det modellen er god på: "blir bussen mer enn 3 min forsinket?" (AUC/Brier) og prediksjonsintervaller.
+- Egne kvantilmodeller for intervallene i stedet for feil fra valid, og en egen klassifikator for > 3 min.
 - Trend-features (siste 7/28 dager, kun fra fortiden), værhendelser, hendelser i byen som kan påvirke tider.
 
 Data: Entur, [data.entur.no](https://data.entur.no) (NLOD) og [Open-Meteo](https://open-meteo.com).
