@@ -9,20 +9,21 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from data import (COLOR_ACTUAL, COLOR_BASELINE, COLOR_MODEL, fmt_clock, fmt_date, fmt_delay,
-                  load_importance, load_metrics, load_oracle, load_predictions, load_rolling, load_final, load_rt_metrics,
-                  load_rt_predictions, load_rt_results, load_trips)
+from data import (COLOR_ACTUAL, COLOR_BASELINE, COLOR_MODEL, fmt_clock, fmt_date, fmt_delay, fmt_num, load_final,
+                  load_importance, load_metrics, load_oracle, load_predictions, load_rolling, load_rt_predictions,
+                  load_rt_results, load_trips)
 
 st.set_page_config(page_title="Bussforsinkelser i Trondheim", page_icon=":material/directions_bus:",
                    layout="wide")
 
 # ---------- Felles grafstil ----------
-SERIES = {"Faktisk": COLOR_ACTUAL, "LightGBM": COLOR_MODEL, "Prognose": COLOR_MODEL,
+SERIES = {"Faktisk": COLOR_ACTUAL, "Modell A": COLOR_MODEL, "Modell B": COLOR_MODEL, "Prognose": COLOR_MODEL,
           "Historisk median": COLOR_BASELINE}
-DASH = {"Faktisk": [1, 0], "LightGBM": [1, 0], "Prognose": [1, 0], "Historisk median": [6, 4]}   # ikke bare farge
+DASH = {"Faktisk": [1, 0], "Modell A": [1, 0], "Modell B": [1, 0], "Prognose": [1, 0], "Historisk median": [6, 4]}   # ikke bare farge
 COLOR_A = "#8FB3D9"      # modell A i sammenligningen med sanntid (lysere blå)
 COLOR_RULE = "#C9A227"   # enkel regel
 LEADS = {"Dagen før": None, "60 min før": 60, "30 min før": 30, "10 min før": 10}
+COMMA = "replace(datum.label, '.', ',')"   # desimalkomma på aksene
 LEGEND = alt.Legend(orient="top", symbolType="stroke", symbolStrokeWidth=2.5, labelFontSize=13)
 
 
@@ -41,6 +42,13 @@ def line_chart(data, x, y, domain, height, tooltip):
     )
 
 
+def _keep_lead():
+    """Et nytt klikk på valgt knapp skal ikke fjerne valget: behold forrige verdi."""
+    if st.session_state.lead is None:
+        st.session_state.lead = st.session_state.get("lead_prev", "30 min før")
+    st.session_state.lead_prev = st.session_state.lead
+
+
 def card_title(text: str):
     st.markdown(f"**{text}**")
 
@@ -53,7 +61,6 @@ oracle = load_oracle()
 importance = load_importance()
 rt_pred = load_rt_predictions()
 rt_res = load_rt_results()
-rt_meta = load_rt_metrics()
 
 B1 = "Baseline 1 - historisk median per linje/stopp/time/dagtype"
 lgbm, base = metrics["LightGBM"], metrics[B1]
@@ -69,7 +76,7 @@ if has_rt:
 # ================= Topp =================
 st.title("Bussforsinkelser i Trondheim")
 st.write(
-    "Hvor forsinket blir bussen ved hvert stopp - **før turen har startet**? To LightGBM-modeller er trent på "
+    "Hvor forsinket blir bussen ved hvert stopp, **før turen har startet**? To LightGBM-modeller er trent på "
     "sanntidsdata fra Entur for AtB (jan-okt 2025) og testet på nov-des 2025, som de aldri har sett: "
     "**modell A** bruker bare det som er kjent dagen før, **modell B** bruker i tillegg hvordan trafikken går de "
     "siste timene før avgang. Begge sammenlignes med en historisk median for samme linje, stopp, retning, time og "
@@ -78,34 +85,48 @@ st.write(
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Feil dagen før (modell A)", f"{lgbm['MAE_s']:.0f} s",
-          delta=f"{(lgbm['MAE_s'] / base['MAE_s'] - 1) * 100:+.1f} % mot baseline",
+          delta=f"{fmt_num((lgbm['MAE_s'] / base['MAE_s'] - 1) * 100, sign=True)} % mot baseline",
           delta_color="inverse", border=True,
           help="Gjennomsnittlig avvik fra faktisk forsinkelse. " + (
-              f"95 % KI for forbedringen: {ci['ci95_lav_%']:.1f}-{ci['ci95_høy_%']:.1f} % (bootstrap over dager)."
+              f"95 % KI for forbedringen: {fmt_num(ci['ci95_lav_%'])}-{fmt_num(ci['ci95_høy_%'])} % (bootstrap over dager)."
               if ci else ""))
 if has_rt:
     k2.metric("Feil 30 min før (modell B)", f"{rt30['MAE_s']:.0f} s",
-              delta=f"{-ci30['B_mot_baseline']['forbedring_%']:+.1f} % mot baseline",
+              delta=f"{fmt_num(-ci30['B_mot_baseline']['forbedring_%'], sign=True)} % mot baseline",
               delta_color="inverse", border=True,
               help="Gjennomsnittlig feil per stopp med prognose laget 30 min før avgang. 95 % KI for forbedringen: "
-                   f"{ci30['B_mot_baseline']['ci95_lav_%']:.1f}-{ci30['B_mot_baseline']['ci95_høy_%']:.1f} % "
-                   f"mot baseline, {ci30['B_mot_A']['ci95_lav_%']:.1f}-{ci30['B_mot_A']['ci95_høy_%']:.1f} % "
+                   f"{fmt_num(ci30['B_mot_baseline']['ci95_lav_%'])}-{fmt_num(ci30['B_mot_baseline']['ci95_høy_%'])} % "
+                   f"mot baseline, {fmt_num(ci30['B_mot_A']['ci95_lav_%'])}-{fmt_num(ci30['B_mot_A']['ci95_høy_%'])} % "
                    "mot modell A.")
-    k3.metric("Treff innenfor +/-2 min (B)", f"{rt30['innen_2min_%']:.1f} %",
-              delta=f"{rt30['innen_2min_%'] - base['innen_2min_%']:+.1f} prosentpoeng", border=True,
+    k3.metric("Innenfor +/-2 min (modell B)", f"{fmt_num(rt30['innen_2min_%'])} %",
+              delta=f"{fmt_num(rt30['innen_2min_%'] - base['innen_2min_%'], sign=True)} prosentpoeng mot baseline", border=True,
               help="Andel stopp der prognosen 30 min før avgang bommet med 2 minutter eller mindre.")
 else:
     k2.metric("Store bom (RMSE)", f"{lgbm['RMSE_s']:.0f} s",
-              delta=f"{(lgbm['RMSE_s'] / base['RMSE_s'] - 1) * 100:+.1f} % mot baseline",
+              delta=f"{fmt_num((lgbm['RMSE_s'] / base['RMSE_s'] - 1) * 100, sign=True)} % mot baseline",
               delta_color="inverse", border=True, help="RMSE straffer store feil ekstra hardt.")
-    k3.metric("Treff innenfor +/-2 min", f"{lgbm['innen_2min_%']:.1f} %",
-              delta=f"{lgbm['innen_2min_%'] - base['innen_2min_%']:+.1f} prosentpoeng", border=True)
+    k3.metric("Innenfor +/-2 min (modell A)", f"{fmt_num(lgbm['innen_2min_%'])} %",
+              delta=f"{fmt_num(lgbm['innen_2min_%'] - base['innen_2min_%'], sign=True)} prosentpoeng mot baseline", border=True)
 if rolling is not None:
     wins = int((rolling.MAE_lgbm < rolling.MAE_baseline).sum())
-    k4.metric("Modell A slår baselinen", f"{wins} av {len(rolling)} måneder", delta="rullende test 2025",
+    k4.metric("Modell A bedre enn baseline", f"{wins} av {len(rolling)} måneder", delta="rullende test mars-des 2025",
               delta_color="off", delta_arrow="off", border=True,
               help="Hver måned mars-des 2025 testet med en modell trent bare på tidligere måneder "
                    "(én seed, uten blanding).")
+
+with st.container(border=True):
+    for col, title, text in zip(st.columns(3), [
+        "Historisk median: baseline",
+        "Modell A: dagen før",
+        "Modell B: 10-60 min før avgang",
+    ], [
+        "Medianforsinkelsen for samme linje, stopp, retning, time og dagtype i månedene før.",
+        "Rute, kalender, vær og historisk forsinkelse. Vet ikke hvordan trafikken går i dag.",
+        "Alt modell A vet, pluss sanntid om linjen, stoppet, nettet og bussen som skal kjøre turen.",
+    ]):
+        with col:
+            card_title(title)
+            st.caption(text)
 
 # ================= Utforsk en tur: kontroller til venstre, graf til høyre =================
 st.subheader("Utforsk en tur fra testperioden")
@@ -142,10 +163,12 @@ with left:
             trip = st.selectbox("Avgang", list(labels), index=default, format_func=labels.get)
         lead_label = "Dagen før"
         if has_rt:
+            if "lead" not in st.session_state:
+                st.session_state.lead = "30 min før"
             lead_label = st.segmented_control(
-                "Prognose laget", list(LEADS), default="30 min før",
+                "Prognose laget", list(LEADS), key="lead", on_change=_keep_lead,
                 help="'Dagen før' er modell A. De andre er modell B, som også vet hvordan linjen, stoppet og "
-                     "hele nettet har gått fram til 2 min før prognosen lages.") or "Dagen før"
+                     "hele nettet har gått fram til 2 min før prognosen lages.") or st.session_state.get("lead_prev", "30 min før")
         st.caption("Utvalget inneholder omtrent én av fire turer, så ikke alle avganger er med.")
 
 if trip is None:
@@ -170,9 +193,9 @@ else:
             m1, m2, m3 = st.columns(3)
             m1.metric("Faktisk forsinkelse (snitt)", fmt_delay(t.y.mean()),
                       help="Gjennomsnitt over alle stoppene på turen.")
-            m2.metric(f"Feil - {model_name}", fmt_delay(mae_model),
+            m2.metric(f"Feil, {model_name}", fmt_delay(mae_model),
                       help="Gjennomsnittlig avvik mellom prognose og faktisk forsinkelse per stopp.")
-            m3.metric("Feil - historisk median", fmt_delay(mae_base),
+            m3.metric("Feil, historisk median", fmt_delay(mae_base),
                       help="Gjennomsnittlig avvik for baselinen per stopp.")
             diff = mae_base - mae_model
             if abs(diff) < 5:
@@ -195,7 +218,7 @@ else:
                 long,
                 x=alt.X("stop_name:N", sort=t["stop_name"].astype(str).tolist(), title=None,
                         axis=alt.Axis(labelAngle=-40, labelLimit=130, labelOverlap=True)),
-                y=alt.Y("min:Q", title="Forsinkelse (minutter)"),
+                y=alt.Y("min:Q", title="Forsinkelse (minutter)", axis=alt.Axis(labelExpr=COMMA)),
                 domain=["Faktisk", "Prognose", "Historisk median"], height=540,
                 tooltip=[alt.Tooltip("stop_name:N", title="Stopp"), alt.Tooltip("planlagt:N", title="Planlagt"),
                          alt.Tooltip("serie:N", title="Serie"), alt.Tooltip("tekst:N", title="Forsinkelse")],
@@ -212,7 +235,8 @@ else:
                 "- **Grå stiplet:** historisk median for samme linje, stopp, time og dagtype."
             )
             st.caption(
-                "Prognosen vet ikke hva som skjer på selve turen. Når forsinkelsen bygger seg opp i trafikken, havner "
+                "Modellen har ikke sett de svarte punktene når prognosen lages, og vet ikke hva som skjer på selve turen. "
+                "Når forsinkelsen bygger seg opp i trafikken, havner "
                 "den ofte under den faktiske linjen. Sanntid hjelper mest på dager der hele linjen går tregt."
             )
 
@@ -237,38 +261,50 @@ a, b = st.columns(2)
 with a:
     with st.container(border=True):
         card_title(f"Linje {line} mot {dests[direction]} gjennom døgnet")
-        d = df[(df.line_no == line) & (df.direction == direction)]
+        d = df[(df.line_no == line) & (df.direction == direction)].copy()
+        # Følger valget "Prognose laget": dagen før = modell A, ellers modell B med valgt lead
+        h_lead = LEADS[lead_label]
+        h_model = "Modell A" if h_lead is None else "Modell B"
+        d["pred"] = d["pred_lgbm"]
+        if h_lead is not None:
+            rb = rt_pred[(rt_pred.lead_min == h_lead) & rt_pred.trip.isin(d.trip.unique())]
+            d = d.merge(rb[["trip", "seq", "pred_rt"]], on=["trip", "seq"], how="left")
+            d["pred"] = d["pred_rt"].fillna(d["pred_lgbm"])
         hourly = (d.assign(time=d.minute_of_day // 60)
-                   .groupby("time")[["y", "pred_lgbm", "pred_baseline"]].median() / 60).reset_index()
-        hourly = hourly.rename(columns={"y": "Faktisk", "pred_lgbm": "LightGBM", "pred_baseline": "Historisk median"})
+                   .groupby("time")[["y", "pred", "pred_baseline"]].median() / 60).reset_index()
+        hourly = hourly.rename(columns={"y": "Faktisk", "pred": h_model, "pred_baseline": "Historisk median"})
         hl = hourly.melt(id_vars="time", var_name="serie", value_name="min")
+        hl["min_txt"] = hl["min"].map(fmt_num)
         st.altair_chart(line_chart(
             hl, x=alt.X("time:O", title="Time på døgnet", axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("min:Q", title="Median forsinkelse (minutter)"),
-            domain=list(SERIES), height=300,
+            y=alt.Y("min:Q", title="Median forsinkelse (minutter)", axis=alt.Axis(labelExpr=COMMA)),
+            domain=["Faktisk", h_model, "Historisk median"], height=300,
             tooltip=[alt.Tooltip("time:O", title="Time"), alt.Tooltip("serie:N", title="Serie"),
-                     alt.Tooltip("min:Q", title="Minutter", format=".1f")],
+                     alt.Tooltip("min_txt:N", title="Minutter")],
         ), width="stretch")
-        st.caption("Median over alle turer og stopp i nov-des 2025. Median brukes fordi modellen er trent til å "
-                   "treffe den typiske forsinkelsen. Timer uten avganger (natt) er utelatt.")
+        h_when = "dagen før" if h_lead is None else f"{h_lead} min før avgang"
+        st.caption(f"Median over alle turer og stopp i nov-des 2025, med prognosen laget {h_when} (modell {h_model[-1]}), "
+                   "som valgt over. Median brukes fordi modellene er trent til å treffe den typiske forsinkelsen. "
+                   "Timer uten avganger (natt) er utelatt.")
 
 with b:
     with st.container(border=True):
         if rolling is not None:
             avg = (1 - (rolling.MAE_lgbm * rolling.n_test).sum()
                    / (rolling.MAE_baseline * rolling.n_test).sum()) * 100
-            card_title(f"Feil per måned i 2025 - {avg:.1f} % lavere enn baselinen i snitt")
+            card_title(f"Feil per måned, mars-des 2025: {fmt_num(avg)} % lavere enn baselinen i snitt")
             MND = ["jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des"]
-            r = rolling.rename(columns={"MAE_baseline": "Historisk median", "MAE_lgbm": "LightGBM"})
+            r = rolling.rename(columns={"MAE_baseline": "Historisk median", "MAE_lgbm": "Modell A"})
             r["måned"] = pd.to_datetime(r["month"]).dt.month.map(lambda m: MND[m - 1])
-            rl = r.melt(id_vars=["month", "måned"], value_vars=["LightGBM", "Historisk median"],
+            rl = r.melt(id_vars=["month", "måned"], value_vars=["Modell A", "Historisk median"],
                         var_name="serie", value_name="mae")
+            rl["mae_txt"] = rl["mae"].map(fmt_num)
             st.altair_chart(line_chart(
                 rl, x=alt.X("måned:N", sort=r["måned"].tolist(), title=None, axis=alt.Axis(labelAngle=0)),
-                y=alt.Y("mae:Q", title="Gjennomsnittlig feil (sekunder)", scale=alt.Scale(zero=False)),
-                domain=["LightGBM", "Historisk median"], height=300,
+                y=alt.Y("mae:Q", title="Gjennomsnittlig feil (sekunder)", scale=alt.Scale(zero=False), axis=alt.Axis(labelExpr=COMMA)),
+                domain=["Modell A", "Historisk median"], height=300,
                 tooltip=[alt.Tooltip("month:N", title="Måned"), alt.Tooltip("serie:N", title="Modell"),
-                         alt.Tooltip("mae:Q", title="MAE (s)", format=".1f")],
+                         alt.Tooltip("mae_txt:N", title="MAE (s)")],
             ), width="stretch")
             st.caption("Hver måned mars-des er testet med en modell trent bare på tidligere måneder, med early "
                        "stopping på måneden før (enkeltmodell A). Gevinsten varierer: størst om vinteren, rundt 1 % i en "
@@ -278,28 +314,30 @@ st.subheader("Hva hjelper å vite rett før avgang?")
 o_col, rt_col = st.columns(2)
 if oracle is not None:
     with o_col, st.container(border=True):
-        card_title("Hvor mye er mulig før avgang?")
-        o = oracle.rename(columns={"MAE_baseline": "Historisk median", "MAE_lightgbm": "LightGBM"})
+        card_title("Hvilken informasjon er verdt mest?")
+        o = oracle.rename(columns={"MAE_baseline": "Historisk median", "MAE_modell_a": "Modell A"})
         ol = o.melt(id_vars="kunnskap", var_name="serie", value_name="mae")
+        ol["mae_txt"] = ol["mae"].map(fmt_num)
         st.altair_chart(
             alt.Chart(ol).mark_bar(cornerRadiusEnd=3)
             .encode(
                 y=alt.Y("kunnskap:N", sort=o["kunnskap"].tolist(), title=None, axis=alt.Axis(labelLimit=320)),
-                yOffset=alt.YOffset("serie:N", sort=["Historisk median", "LightGBM"]),
+                yOffset=alt.YOffset("serie:N", sort=["Historisk median", "Modell A"]),
                 x=alt.X("mae:Q", title="Gjennomsnittlig feil (sekunder)"),
                 color=alt.Color("serie:N", title=None, legend=alt.Legend(orient="top"),
-                                scale=alt.Scale(domain=["Historisk median", "LightGBM"],
+                                scale=alt.Scale(domain=["Historisk median", "Modell A"],
                                                 range=[COLOR_BASELINE, COLOR_MODEL])),
                 tooltip=[alt.Tooltip("kunnskap:N", title="Oraklet vet"), alt.Tooltip("serie:N", title="Modell"),
-                         alt.Tooltip("mae:Q", title="MAE (s)", format=".1f")],
+                         alt.Tooltip("mae_txt:N", title="MAE (s)")],
             )
             .properties(height=300),
             width="stretch",
         )
         st.caption(
-            "Et 'orakel' får vite medianfeilen for sin gruppe på selve dagen - noe som først er kjent i ettertid, "
+            "Et 'orakel' får vite medianfeilen for sin gruppe på selve dagen, noe som først er kjent i ettertid, "
             "så dette er øvre grenser. Informasjon på dagsnivå (vær, hendelser) er verdt lite. Det store potensialet "
-            "ligger i forsinkelsen på samme linje de siste timene - kjent i sanntid rett før avgang, ikke dager i forveien."
+            "ligger i forsinkelsen på samme linje de siste timene, som er kjent i sanntid rett før avgang, men ikke "
+            "dager i forveien."
         )
 
 
@@ -313,6 +351,7 @@ if has_rt:
         rr.loc[rr.metode == "Modell A (før dagen)", "MAE_s"] = lgbm["MAE_s"]   # endelig A (samme for alle lead)
         rr["serie"] = rr.metode.map(labels)
         rr["når"] = rr.lead_min.map(lambda m: f"{m} min før")
+        rr["mae_txt"] = rr["MAE_s"].map(fmt_num)
         st.altair_chart(
             alt.Chart(rr).mark_bar(cornerRadiusEnd=3)
             .encode(
@@ -324,19 +363,22 @@ if has_rt:
                                 scale=alt.Scale(domain=[labels[o] for o in order],
                                                 range=[COLOR_BASELINE, COLOR_A, COLOR_RULE, COLOR_MODEL])),
                 tooltip=[alt.Tooltip("når:N", title="Prognose laget"), alt.Tooltip("serie:N", title="Metode"),
-                         alt.Tooltip("MAE_s:Q", title="MAE (s)", format=".1f")],
+                         alt.Tooltip("mae_txt:N", title="MAE (s)")],
             )
             .properties(height=300),
             width="stretch",
         )
         b30 = ci30["B_mot_A"]
+        st.markdown(
+            "Modell B bruker i tillegg:\n"
+            "- Linje og stopp: nylig forsinkelse på samme linje og ved samme stopp\n"
+            "- Nettet: forsinkelsesutviklingen på andre linjer og på strekningene videre\n"
+            "- Bussen: hvor forsinket bussen som skal kjøre turen er nå"
+        )
         st.caption(
-            f"Modell B bruker hvordan linjen, stoppet og nettet har gått de siste timene, forrige buss ved samme "
-            f"stopp, forsinkelsesveksten på strekningene videre og bussen som skal kjøre turen. 30 min før avgang "
-            f"bommer den {b30['forbedring_%']:.1f} % mindre enn modell A (95 % KI {b30['ci95_lav_%']:.1f}-"
-            f"{b30['ci95_høy_%']:.1f} %). En kontroll trent likt, men uten sanntidsfeatures, havnet på nivå med A - "
-            "gevinsten kommer fra sanntidsdataene. Den er størst på de første stoppene ved kort lead, men mesteparten "
-            "av signalet er hvordan dagen går. X-aksen starter ikke på 0."
+            f"30 min før avgang bommer modell B {fmt_num(b30['forbedring_%'])} % mindre enn modell A "
+            f"(95 % KI {fmt_num(b30['ci95_lav_%'])}-{fmt_num(b30['ci95_høy_%'])} %). En kontroll trent likt, men uten "
+            "sanntidsdata, havnet på nivå med A, så gevinsten kommer fra sanntidsdataene. X-aksen starter ikke på 0."
         )
 
 c, e = st.columns(2)
@@ -348,16 +390,11 @@ with c:
         if has_rt:
             rows.append(("Modell B (30 min før)", rt30))
         st.dataframe(
-            pd.DataFrame([{"Modell": n, "MAE (s)": m["MAE_s"], "RMSE (s)": m["RMSE_s"],
-                           "Innen +/-1 min": m["innen_1min_%"], "Innen +/-2 min": m["innen_2min_%"]}
+            pd.DataFrame([{"Modell": n, "MAE (s)": f"{m['MAE_s']:.0f}", "RMSE (s)": f"{m['RMSE_s']:.0f}",
+                           "Innen +/-1 min": f"{fmt_num(m['innen_1min_%'])} %",
+                           "Innen +/-2 min": f"{fmt_num(m['innen_2min_%'])} %"}
                           for n, m in rows]),
             hide_index=True,
-            column_config={
-                "MAE (s)": st.column_config.NumberColumn(format="%.0f"),
-                "RMSE (s)": st.column_config.NumberColumn(format="%.0f"),
-                "Innen +/-1 min": st.column_config.NumberColumn(format="%.1f %%"),
-                "Innen +/-2 min": st.column_config.NumberColumn(format="%.1f %%"),
-            },
         )
         n_test = metrics.get("_info", {}).get("n_test")
         if n_test:
@@ -366,8 +403,8 @@ with c:
         card_title("Metode")
         st.markdown(
             """
-- **Kun informasjon kjent før avgang:** linje, stopp, retning, rutetid, kalender, dagslys og vær.
-  Forsinkelse ved forrige stopp er bevisst utelatt - den ville gjort oppgaven triviell.
+- **Kun informasjon kjent før avgang:** linje, stopp, retning, rutetid, kalender, dagslys, vær og historisk
+  forsinkelse. Forsinkelse ved forrige stopp er bevisst utelatt, den ville gjort oppgaven triviell.
 - **Tidsbasert splitt:** trening jan-aug 2025, validering sep-okt, test nov-des 2025.
 - **Historiske features** bygges fra alle ~43 mill. stoppanløp. Treningsrader får *fold-historikk* (aldri sin
   egen fasit); test- og valideringsrader ser bare fortiden. Oppsettet ble valgt over mars-okt, ikke på testen.
@@ -383,7 +420,7 @@ with c:
 with e:
     with st.container(border=True):
         if importance is not None:
-            card_title("Hva modellen legger vekt på")
+            card_title("Hva modell A legger vekt på")
             names = {
                 "hist_med_lsdhd": "Historisk median (linje, stopp, time, dagtype)", "stop": "Stopp",
                 "line": "Linje", "daylight_h": "Timer dagslys", "temp": "Temperatur", "wind": "Vind",
@@ -398,13 +435,14 @@ with e:
             }
             top = importance.sort_values("gain_pct", ascending=False).head(10).copy()
             top["navn"] = top["feature"].map(names).fillna(top["feature"])
+            top["gain_txt"] = top["gain_pct"].map(fmt_num)
             st.altair_chart(
                 alt.Chart(top).mark_bar(color=COLOR_MODEL, cornerRadiusEnd=3)
                 .encode(
                     x=alt.X("gain_pct:Q", title="Andel av modellens gain (%)", axis=alt.Axis(tickCount=6)),
                     y=alt.Y("navn:N", sort="-x", title=None, axis=alt.Axis(labelLimit=300)),
                     tooltip=[alt.Tooltip("navn:N", title="Feature"),
-                             alt.Tooltip("gain_pct:Q", title="%", format=".1f")],
+                             alt.Tooltip("gain_txt:N", title="%")],
                 )
                 .properties(height=30 * len(top)),
                 width="stretch",
@@ -420,7 +458,7 @@ with e:
 - Før avgang er mye av forsinkelsen tilfeldig, så forbedringen over en god historisk regel er moderat.
 - Sanntidsdataene er de endelige registrerte tidene. Den ekte strømmen kan komme senere eller bli rettet,
   derav bufferen på 2 min.
-- Værdata er målt vær, ikke værvarsel - en ekte tjeneste måtte brukt varsel.
+- Værdata er målt vær, ikke værvarsel. En ekte tjeneste måtte brukt varsel.
 - Innenfor +/-1 minutt treffer baselinen litt oftere enn modell A (49,3 % mot 48,6 %); B treffer oftest
   (50,1 %). Modellenes største styrke er færre store bom.
 - Den innkommende bussen finnes bare for ~10 % av turene (samme linje, samme holdeplassnavn); busser som bytter

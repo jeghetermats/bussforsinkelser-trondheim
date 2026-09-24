@@ -35,6 +35,11 @@ def fmt_delay(seconds: float) -> str:
     return f"{sign}{s // 60} min {s % 60:02d} s"
 
 
+def fmt_num(x: float, dec: int = 1, sign: bool = False) -> str:
+    """Tall med desimalkomma: 3.64 -> '3,6', med sign=True '+3,6'."""
+    return (f"{x:+.{dec}f}" if sign else f"{x:.{dec}f}").replace(".", ",")
+
+
 UKEDAGER = ["mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag"]
 MÅNEDER = ["januar", "februar", "mars", "april", "mai", "juni", "juli", "august", "september",
            "oktober", "november", "desember"]
@@ -106,12 +111,6 @@ def load_rt_predictions() -> pd.DataFrame | None:
 def load_rt_results() -> pd.DataFrame | None:
     p = _find("rt_results.csv")
     return pd.read_csv(p) if p.exists() else None
-
-
-@st.cache_data
-def load_rt_metrics() -> dict | None:
-    p = _find("rt_metrics.json")
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
 @st.cache_data

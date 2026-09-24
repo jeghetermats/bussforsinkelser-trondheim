@@ -19,7 +19,7 @@ d = pd.read_parquet(REPORTS / "test_predictions.parquet")
 d["hour"] = d.minute_of_day // 60
 y = d.y.astype(float)
 LEVELS = [
-    ("Ingen (dagens modeller)", None),
+    ("Ingenting ekstra", None),
     ("Hele nettets nivå den dagen", ["date"]),
     ("Linjens nivå den dagen", ["line", "date"]),
     ("Linje, retning og time den dagen", ["line", "direction", "date", "hour"]),
@@ -28,7 +28,7 @@ LEVELS = [
 rows = []
 for label, keys in LEVELS:
     r = {"kunnskap": label}
-    for name, col in [("baseline", "pred_baseline"), ("lightgbm", "pred_lgbm")]:
+    for name, col in [("baseline", "pred_baseline"), ("modell_a", "pred_lgbm")]:
         p = d[col].astype(float)
         if keys:
             p = p + (y - p).groupby([d[k] for k in keys], observed=True).transform("median")
@@ -41,7 +41,7 @@ print(res.round(1).to_string(index=False))
 fig, ax = plt.subplots(figsize=(8, 3.8))
 x = np.arange(len(res))
 ax.bar(x - 0.2, res.MAE_baseline, 0.4, color="#999999", label="Historisk median + korreksjon")
-ax.bar(x + 0.2, res.MAE_lightgbm, 0.4, color="#1F4E79", label="LightGBM + korreksjon")
+ax.bar(x + 0.2, res.MAE_modell_a, 0.4, color="#1F4E79", label="Modell A + korreksjon")
 ax.set_xticks(x, [l.replace(" den dagen", "\nden dagen") for l in res.kunnskap], fontsize=8)
 ax.set_ylabel("MAE (sekunder)"); ax.legend(fontsize=8)
 ax.set_title("Hvor mye kunne vi tjent på å vite mer om dagen? (øvre grenser)")

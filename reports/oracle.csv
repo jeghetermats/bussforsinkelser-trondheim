@@ -1,5 +1,5 @@
-kunnskap,MAE_baseline,MAE_lightgbm
-Ingen (dagens modeller),106.49392735367881,101.99193777533557
+kunnskap,MAE_baseline,MAE_modell_a
+Ingenting ekstra,106.49392735367881,101.99193777533557
 Hele nettets nivå den dagen,103.91914233850893,100.12469354975062
 Linjens nivå den dagen,96.05381254637848,92.38675019490705
 "Linje, retning og time den dagen",59.971427330196036,57.719559275227546
