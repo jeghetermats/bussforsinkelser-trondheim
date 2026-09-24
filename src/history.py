@@ -26,7 +26,6 @@ SPECS = {
     "g":     ([], ["median(y) AS med_g"]),
 }
 FEATURE_COLS = ["hist_med_lsdhd", "hist_mean_lsd", "hist_std_lsd", "hist_mean_lhd", "hist_mean_sh"]
-BASELINE_SQL = "coalesce(hist_med_lsdhd, med_lsd, med_lhd, med_l, med_g)"
 
 
 def _exists(con, name):

@@ -10,9 +10,6 @@ DATA, REPORTS, MODELS = ROOT / "data", ROOT / "reports", ROOT / "models"
 
 CAT = ["line", "stop", "direction"]
 
-# Historiske features (se src/history.py)
-HIST_COLS = ["hist_med_lsdhd", "hist_mean_lsd", "hist_std_lsd", "hist_mean_lhd", "hist_mean_sh"]
-
 # Kolonner som ikke er features: mål, dato, baseline-prognosen og id-/visningskolonner til appen
 NON_FEATURES = ("y", "date", "baseline", "journey_id", "stop_name", "origin_name", "dest_name")
 
@@ -80,8 +77,8 @@ def bootstrap_mae_gain(dates, y, pred_model, pred_base, n_boot=2000, seed=0):
     """95 %-intervall for relativ MAE-forbedring, med hele dager som trekkenhet
     (rader samme dag er ikke uavhengige: samme vær, trafikk og hendelser)."""
     d = pd.DataFrame({"date": dates, "em": np.abs(pred_model - y), "eb": np.abs(pred_base - y)})
-    per_day = d.groupby("date")[["em", "eb"]].agg(["sum", "count"])
-    sm, sb, n = per_day[("em", "sum")].to_numpy(), per_day[("eb", "sum")].to_numpy(), per_day[("em", "count")].to_numpy()
+    per_day = d.groupby("date")[["em", "eb"]].sum()
+    sm, sb = per_day["em"].to_numpy(), per_day["eb"].to_numpy()
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, len(sm), size=(n_boot, len(sm)))
     gain = 1 - sm[idx].sum(1) / sb[idx].sum(1)

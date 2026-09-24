@@ -30,7 +30,7 @@ from pathlib import Path
 
 import duckdb
 
-from history import BASELINE_SQL, baseline_select, build_oof, build_past_monthly, feature_select, join_sql
+from history import baseline_select, build_oof, build_past_monthly, feature_select, join_sql
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"

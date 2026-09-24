@@ -31,7 +31,6 @@ Kjør:  python src/ablation.py                        (alle varianter, seed 0)
 Resultater: reports/ablation.csv (+ prognoser i data/ablation/, så ferdige varianter hoppes over).
 """
 import argparse
-import json
 import os
 import sys
 import time

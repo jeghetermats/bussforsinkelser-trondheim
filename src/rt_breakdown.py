@@ -7,15 +7,14 @@ ved kort lead. Leser reports/test_predictions.parquet (A) og reports/rt_test_pre
 Resultat: reports/rt_breakdown.csv og reports/rt_breakdown.png
 Kjør:     python src/rt_breakdown.py
 """
-from pathlib import Path
-
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-REPORTS = Path(__file__).resolve().parents[1] / "reports"
+from common import REPORTS
+
 BINS = [-1, 5, 15, 30, 60, 1000]
 LABELS = ["0-5", "5-15", "15-30", "30-60", "60+"]
 
