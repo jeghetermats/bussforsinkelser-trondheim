@@ -467,4 +467,4 @@ with e:
 """
         )
 
-st.caption("Data: Entur (NLOD) og Open-Meteo | Kode: [github.com/jeghetermats](https://github.com/jeghetermats)")
+st.caption("Data: Entur (NLOD) og Open-Meteo | Kode: [github.com/jeghetermats/bussforsinkelser-trondheim](https://github.com/jeghetermats/bussforsinkelser-trondheim)")

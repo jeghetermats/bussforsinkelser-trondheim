@@ -6,10 +6,12 @@ To LightGBM-modeller sammenlignes med en historisk baseline: medianforsinkelsen 
 
 ## Demo
 
+Prøv appen: [bussforsinkelser-trondheim.streamlit.app](https://bussforsinkelser-trondheim.streamlit.app/)
+
 Utforsk enkeltturer fra testperioden og se hvordan Modell A og B sammenlignes
 med den historiske baselinen.
 
-![Streamlit-appen](docs/app.png)
+[![Streamlit-appen](docs/app.png)](https://bussforsinkelser-trondheim.streamlit.app/)
 
 ## Resultater
 
