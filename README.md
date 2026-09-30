@@ -1,5 +1,7 @@
 # Bussforsinkelser i Trondheim, prediksjon før avgang
 
+[![CI](https://github.com/jeghetermats/bussforsinkelser-trondheim/actions/workflows/ci.yml/badge.svg)](https://github.com/jeghetermats/bussforsinkelser-trondheim/actions/workflows/ci.yml)
+
 Dette prosjektet undersøker hvor godt bussforsinkelser kan predikeres før en busstur har startet. Det bruker sanntidsdata fra Entur for AtB fra desember 2024 til desember 2025, med rundt 43 millioner målinger (én per buss per stopp) etter rensing. 
 
 To LightGBM-modeller sammenlignes med en historisk baseline: medianforsinkelsen for samme linje, stopp, retning, time og dagtype beregnet fra alle tidligere måneder.
@@ -147,6 +149,17 @@ Appen bruker bare forhåndsberegnede filer i `reports/`, så den trenger hverken
 ```bash
 pip install -r app/requirements.txt
 streamlit run app/streamlit_app.py
+```
+
+### Tester
+
+Enhetstester for målene og formateringen, og en røyktest som starter appen og prøver valgene.
+Kjøres også automatisk på GitHub ved hver push, sammen med `ruff`.
+
+```bash
+pip install -r app/requirements.txt pytest ruff
+ruff check .
+pytest
 ```
 
 ### Installasjon og data

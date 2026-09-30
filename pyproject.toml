@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 120
+extend-exclude = ["data", "models"]
+
+[tool.ruff.lint]
+# Standardreglene (pyflakes + de viktigste pycodestyle-reglene). Semikolon mellom korte kall i
+# plottekoden og variabelnavnet l er bevisste stilvalg.
+ignore = ["E702", "E741"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
