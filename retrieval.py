@@ -4,17 +4,21 @@ Henter AtB-sanntidsdata fra Entur (BigQuery) måned for måned til data/raw/.
 Kjør:  python retrieval.py 2024          (henter alle måneder i 2024)
        python retrieval.py 2024 2025     (flere år)
 
+Spørringene faktureres til ditt eget Google Cloud-prosjekt: sett miljøvariabelen GCP_PROJECT,
+eller velg et standardprosjekt med  gcloud config set project <prosjekt-id>.
+
 Måneder som allerede er lastet ned hoppes over, så skriptet kan avbrytes og startes på nytt.
 Har du allerede atb_2025.parquet i prosjektmappen, trenger du bare å hente 2024.
 """
 import calendar
+import os
 import sys
 from pathlib import Path
 
 import pyarrow.parquet as pq
 from google.cloud import bigquery
 
-PROJECT = "tough-totem-259120"
+PROJECT = os.environ.get("GCP_PROJECT")   # None = standardprosjektet fra gcloud
 ROOT = Path(__file__).resolve().parent
 RAW = ROOT / "data" / "raw"
 RAW.mkdir(parents=True, exist_ok=True)

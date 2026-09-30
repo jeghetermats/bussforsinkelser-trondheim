@@ -154,6 +154,7 @@ streamlit run app/streamlit_app.py
 ```bash
 pip install -r requirements.txt
 gcloud auth application-default login
+export GCP_PROJECT=<ditt-prosjekt>   # Google Cloud-prosjektet som betaler for BigQuery (Windows: set)
 python retrieval.py 2024 2025     # rådata fra BigQuery, måned for måned -> data/raw/ (data finnes fra des 2024)
 python src/weather.py             # timesvær fra Open-Meteo
 python src/features.py            # DuckDB: rensing, historikk over alle rader, train/valid/test
