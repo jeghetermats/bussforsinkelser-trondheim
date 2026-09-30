@@ -157,7 +157,7 @@ Enhetstester for målene og formateringen, og en røyktest som starter appen og 
 Kjøres også automatisk på GitHub ved hver push, sammen med `ruff`.
 
 ```bash
-pip install -r app/requirements.txt pytest ruff
+pip install -r app/requirements.txt pytest==9.1.1 ruff==0.16.9
 ruff check .
 pytest
 ```
