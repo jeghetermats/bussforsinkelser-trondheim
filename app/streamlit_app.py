@@ -233,7 +233,7 @@ else:
             card_title("Slik leser du grafen")
             st.markdown(
                 "- **Svart:** faktisk forsinkelse ved hvert stopp.\n"
-                "- **Blå:** prognosen, laget på tidspunktet du har valgt.\n"
+                "- **Blå:** modellens prognose. Modell A lager den dagen før, modell B 10–60 min før avgang.\n"
                 "- **Grå stiplet:** historisk median for samme linje, stopp, time og dagtype."
             )
             st.caption(
