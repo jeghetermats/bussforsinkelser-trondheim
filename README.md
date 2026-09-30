@@ -107,7 +107,7 @@ Detaljer om oraklet, alle features, valg av oppsett, ablasjonen og det som ikke 
 - Mål: ankomstforsinkelse i sekunder ved hvert stopp (faktisk minus planlagt ankomst).
 - Kun informasjon kjent før avgang: linje, stopp, retning, rutetid, kalender (helligdager, skoleferie,
   julaften/nyttårsaften), dagslys, vær og historisk forsinkelse. Forsinkelse ved forrige stopp er bevisst utelatt,
-  den forklarer 96 % av variasjonen og gjør oppgaven triviell.
+  siden den nesten gir fasiten og gjør oppgaven triviell.
 - Tidsbasert splitt: trening jan-aug 2025, validering sep-okt (early stopping), test nov-des 2025.
   Endelig modell retrenes på jan-okt. Desember 2024 brukes bare som historikk.
 - Historiske features (median/snitt/spredning per linje, stopp, time ...) beregnes i DuckDB over alle
@@ -185,6 +185,9 @@ python src/ablation.py --cv --seeds 0,1   # valg av oppsett over mars-okt (valgf
 - Modell B bruker de endelige registrerte tidene. Den ekte sanntidsstrømmen kan komme senere eller bli rettet
   i ettertid; bufferen på 2 min dekker bare en del av det.
 - Valget av oppsett for modell B er bare gjort på sep-okt, ikke måned for måned.
+- Modell B holder turen selv utenfor sanntidsfeaturene bare via tidspunktet: observasjoner må komme før
+  planlagt avgang minus lead minus 2 min. En buss som går over 12 min for tidlig fra første stopp, kan i
+  sjeldne tilfeller se sin egen observasjon (ved 10 min lead). Effekten er trolig ubetydelig.
 
 ## Videre arbeid
 
