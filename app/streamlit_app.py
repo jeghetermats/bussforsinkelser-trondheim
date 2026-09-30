@@ -17,9 +17,10 @@ st.set_page_config(page_title="Bussforsinkelser i Trondheim", page_icon=":materi
                    layout="wide")
 
 # ---------- Felles grafstil ----------
-SERIES = {"Faktisk": COLOR_ACTUAL, "Modell A": COLOR_MODEL, "Modell B": COLOR_MODEL, "Prognose": COLOR_MODEL,
-          "Historisk median": COLOR_BASELINE}
-DASH = {"Faktisk": [1, 0], "Modell A": [1, 0], "Modell B": [1, 0], "Prognose": [1, 0], "Historisk median": [6, 4]}   # ikke bare farge
+SERIES = {"Faktisk": COLOR_ACTUAL, "Modell A": COLOR_MODEL, "Modell B": COLOR_MODEL, "Historisk median": COLOR_BASELINE}
+SERIES |= {f"Modell {m} ({when})": COLOR_MODEL
+           for m, when in [("A", "dagen før"), ("B", "60 min før"), ("B", "30 min før"), ("B", "10 min før")]}
+DASH = {name: [1, 0] for name in SERIES} | {"Historisk median": [6, 4]}   # ikke bare farge
 COLOR_A = "#8FB3D9"      # modell A i sammenligningen med sanntid (lysere blå)
 COLOR_RULE = "#C9A227"   # enkel regel
 LEADS = {"Dagen før": None, "60 min før": 60, "30 min før": 30, "10 min før": 10}
@@ -184,6 +185,7 @@ else:
         r = rt_pred[(rt_pred.trip == trip) & (rt_pred.lead_min == lead)].set_index("seq")["pred_rt"]
         t["pred"] = t["seq"].map(r).fillna(t["pred_lgbm"])
     model_name = "modell A" if lead is None else "modell B"
+    model_label = "Modell A (dagen før)" if lead is None else f"Modell B ({lead_label})"
     mae_model = float(np.mean(np.abs(t.pred - t.y)))
     mae_base = float(np.mean(np.abs(t.pred_baseline - t.y)))
 
@@ -208,7 +210,7 @@ else:
                            "per stopp.")
             long = t.melt(id_vars=["seq", "stop_name", "minute_of_day"],
                           value_vars=["y", "pred", "pred_baseline"], var_name="serie", value_name="sek")
-            long["serie"] = long["serie"].map({"y": "Faktisk", "pred": "Prognose",
+            long["serie"] = long["serie"].map({"y": "Faktisk", "pred": model_label,
                                                "pred_baseline": "Historisk median"})
             long["min"] = long["sek"] / 60
             long["planlagt"] = long["minute_of_day"].map(fmt_clock)
@@ -219,7 +221,7 @@ else:
                 x=alt.X("stop_name:N", sort=t["stop_name"].astype(str).tolist(), title=None,
                         axis=alt.Axis(labelAngle=-40, labelLimit=130, labelOverlap=True)),
                 y=alt.Y("min:Q", title="Forsinkelse (minutter)", axis=alt.Axis(labelExpr=COMMA)),
-                domain=["Faktisk", "Prognose", "Historisk median"], height=540,
+                domain=["Faktisk", model_label, "Historisk median"], height=540,
                 tooltip=[alt.Tooltip("stop_name:N", title="Stopp"), alt.Tooltip("planlagt:N", title="Planlagt"),
                          alt.Tooltip("serie:N", title="Serie"), alt.Tooltip("tekst:N", title="Forsinkelse")],
             )
