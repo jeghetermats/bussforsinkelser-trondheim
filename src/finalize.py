@@ -27,21 +27,21 @@ a_single = runs[0]["test"].astype("float64")
 a_final = w * np.mean([r["test"] for r in runs], axis=0) + (1 - w) * base.baseline.to_numpy("float64")
 
 y = t.y.to_numpy("float64")
-b0 = base.baseline.to_numpy("float64")
+base_pred = base.baseline.to_numpy("float64")
 dates = pd.to_datetime(t.date).to_numpy()
 out = {"A": {"w": w, "seeds": seeds,
-             "metrics": metrics(y, a_final), "metrics_én_seed": metrics(y, a_single), "metrics_baseline": metrics(y, b0),
-             "mot_baseline": bootstrap_mae_gain(dates, y, a_final, b0),
+             "metrics": metrics(y, a_final), "metrics_én_seed": metrics(y, a_single), "metrics_baseline": metrics(y, base_pred),
+             "mot_baseline": bootstrap_mae_gain(dates, y, a_final, base_pred),
              "mot_én_seed": bootstrap_mae_gain(dates, y, a_final, a_single)}}
-rows = [{"lead": "dagen før", "metode": "Historisk median", **metrics(y, b0)},
+rows = [{"lead": "dagen før", "metode": "Historisk median", **metrics(y, base_pred)},
         {"lead": "dagen før", "metode": "Modell A", **metrics(y, a_final)}]
 
 # Modell B per lead, koblet på tur og stopp
 t["pred_a_single"] = np.round(a_single).astype("int16")
 t["pred_lgbm"] = np.round(a_final).astype("int16")
-t["_a"], t["_b0"] = a_final, b0
+t["_a"], t["_base"] = a_final, base_pred
 rt = pd.read_parquet(REPORTS / "rt_test_predictions.parquet", columns=["trip", "seq", "lead_min", "pred_rt"])
-d = rt.merge(t[["trip", "seq", "y", "date", "_a", "_b0"]], on=["trip", "seq"])
+d = rt.merge(t[["trip", "seq", "y", "date", "_a", "_base"]], on=["trip", "seq"])
 assert len(d) == len(rt)
 r1_path = REPORTS / "rt_test_predictions_r1.parquet"
 if r1_path.exists():
@@ -50,8 +50,8 @@ if r1_path.exists():
 out["B"] = {}
 for lead, g in d.groupby("lead_min"):
     yy, dd = g.y.to_numpy("float64"), pd.to_datetime(g.date).to_numpy()
-    pb, pa, p0 = g.pred_rt.to_numpy("float64"), g._a.to_numpy(), g._b0.to_numpy()
-    res = {"metrics": metrics(yy, pb), "mot_baseline": bootstrap_mae_gain(dd, yy, pb, p0),
+    pb, pa, pbase = g.pred_rt.to_numpy("float64"), g._a.to_numpy(), g._base.to_numpy()
+    res = {"metrics": metrics(yy, pb), "mot_baseline": bootstrap_mae_gain(dd, yy, pb, pbase),
            "mot_A": bootstrap_mae_gain(dd, yy, pb, pa)}
     if "_r1" in g and g._r1.notna().all():
         res["mot_runde1"] = bootstrap_mae_gain(dd, yy, pb, g._r1.to_numpy("float64"))
@@ -59,7 +59,7 @@ for lead, g in d.groupby("lead_min"):
     out["B"][str(int(lead))] = res
     rows.append({"lead": f"{int(lead)} min før", "metode": "Modell B", **res["metrics"]})
 
-t.drop(columns=["_a", "_b0"]).to_parquet(REPORTS / "test_predictions.parquet", index=False, compression="zstd")
+t.drop(columns=["_a", "_base"]).to_parquet(REPORTS / "test_predictions.parquet", index=False, compression="zstd")
 (REPORTS / "final.json").write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
 pd.DataFrame(rows).to_csv(REPORTS / "final_results.csv", index=False)
 

@@ -67,7 +67,7 @@ def rule(df, k, m):
 
 m_anom = float(train.rt_ld_anom60.median())
 grid = np.round(np.arange(0, 1.01, 0.05), 2)
-k_best = min(grid, key=lambda k: np.mean(np.abs(rule(valid, k, m_anom) - valid.y)))
+k_best = min(grid, key=lambda k, v=valid: np.mean(np.abs(rule(v, k, m_anom) - v.y)))
 print(f"Regel: k = {k_best} (valgt på valid), typisk avvik m = {m_anom:.1f} s")
 
 # ---------- Én modell per seed: early stopping på valid, retrening på jan-okt ----------
@@ -105,10 +105,11 @@ pred = {
 }
 if len(SEEDS) > 1:
     pred[f"Modell B, én seed ({SEEDS[0]})"] = pred_seeds[0]
-# Forrige versjon av B (runde 1), koblet på tur, stopp og lead
+# Tur-id som i test_predictions.parquet (brukes også til prognosefilen til appen)
 trip_ids = pd.read_parquet(DATA / "test.parquet", columns=["journey_id"]).journey_id
 trip_map = pd.Series(np.arange(trip_ids.nunique(), dtype="int32"), index=pd.unique(trip_ids))
 test_trip = test.journey_id.map(trip_map).astype("Int32")
+# Forrige versjon av B (runde 1), koblet på tur, stopp og lead
 if R1_PATH.exists() and not NO_RT:
     r1 = pd.read_parquet(R1_PATH, columns=["trip", "seq", "lead_min", "pred_rt"])
     key = pd.DataFrame({"trip": test_trip, "seq": test.seq.astype("int16"), "lead_min": test.lead_min.astype("int8")})
@@ -158,9 +159,7 @@ print("\nSanntidsfeatures, andel av gain: "
       f"{imp[[c for c in RT_FEATURES if c in imp.index]].sum() / imp.sum() * 100:.0f} %")
 
 # ---------- Prognoser til appen (samme tur-id som test_predictions.parquet) ----------
-trip_ids = pd.read_parquet(DATA / "test.parquet", columns=["journey_id"]).journey_id
-trip_map = pd.Series(np.arange(trip_ids.nunique(), dtype="int32"), index=pd.unique(trip_ids))
-out = pd.DataFrame({"trip": test.journey_id.map(trip_map).astype("Int32"),
+out = pd.DataFrame({"trip": test_trip,
                     "seq": test.seq.astype("int16"), "lead_min": test.lead_min.astype("int8"),
                     "pred_rt": np.round(pred["Modell B (sanntid)"]).astype("int16"),
                     "pred_rule": np.round(pred["Baseline + avvik siste time"]).astype("int16")})
