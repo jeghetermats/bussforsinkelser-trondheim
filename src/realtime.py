@@ -39,21 +39,13 @@ import os
 import time
 from pathlib import Path
 
-import duckdb
-
+from common import DATA, SAMPLE_PCT, SPLITS, connect_duckdb, raw_files, raw_sql
 from history import baseline_select, feature_select, join_sql
-
-ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / "data"
 
 IN_MAX_GAP = 90                     # innkommende buss: maks planlagt pause (min) før vi regner den som ukjent
 BUFFER_MIN = 2                      # rapporteringsforsinkelse vi antar i sanntidsstrømmen
 TEST_LEADS = [10, 30, 60]
 LEAD_MIN, LEAD_MAX = 5, 90          # lead-intervall for trening/valid
-SAMPLE_PCT = {"train": 20, "valid": 25, "test": 25}      # samme som features.py
-SPLITS = {"train": ("2025-01-01", "2025-08-31"),
-          "valid": ("2025-09-01", "2025-10-31"),
-          "test":  ("2025-11-01", "2025-12-31")}
 P1, P2, PAST = "f.hoof_20250831", "f.hoof_20251031", "f.hpast"   # bygget av features.py
 FOLD = "dayofyear(c.date) % 5"
 MONTH = "date_trunc('month', c.date)::DATE"
@@ -79,26 +71,18 @@ def date_filter(col):
     return " AND ".join(parts) if parts else "TRUE"
 
 
-con = duckdb.connect(str(DB))
-con.execute(f"SET temp_directory='{(DATA / 'tmp').as_posix()}'")
-if os.environ.get("DUCKDB_MEMORY_LIMIT"):
-    con.execute(f"SET memory_limit='{os.environ['DUCKDB_MEMORY_LIMIT']}'")
-if os.environ.get("DUCKDB_THREADS"):
-    con.execute(f"SET threads={int(os.environ['DUCKDB_THREADS'])}")
+con = connect_duckdb(DB)
 con.execute(f"ATTACH '{(DATA / 'features.duckdb').as_posix()}' AS f (READ_ONLY)")
 
 # ================= 1. Observasjoner med faktisk tidspunkt =================
 t0 = time.time()
-raw_files = [p for p in sorted((DATA / "raw").glob("atb_*.parquet")) if p.stat().st_size > 10_000]
-if (ROOT / "atb_2025.parquet").exists():
-    raw_files = [p for p in raw_files if not p.name.startswith("atb_2025")] + [ROOT / "atb_2025.parquet"]
-raw_sql = "read_parquet([" + ", ".join(f"'{p.as_posix()}'" for p in raw_files) + "], union_by_name=true)"
+RAW_SQL = raw_sql(raw_files())
 con.execute(f"""
 CREATE OR REPLACE TABLE trip_ts AS
 SELECT journey_id, any_value(lineRef) AS line,
        min(aimed_arrival_local)::TIMESTAMP AS trip_start_ts, max(aimed_arrival_local)::TIMESTAMP AS trip_end_ts,
        arg_min(stopPointName, seq) AS origin_name, arg_max(stopPointName, seq) AS dest_name, max(seq) AS n_stops
-FROM {raw_sql} WHERE {date_filter('operatingDate')} GROUP BY journey_id
+FROM {RAW_SQL} WHERE {date_filter('operatingDate')} GROUP BY journey_id
 """)
 con.execute(f"""
 CREATE OR REPLACE TABLE obs AS

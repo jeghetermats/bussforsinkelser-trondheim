@@ -23,34 +23,21 @@ Kjør:  python src/features.py              (bygger alt)
        python src/features.py --reuse      (gjenbruker clean og historikktabeller fra forrige kjøring)
 Valgfritt: DUCKDB_MEMORY_LIMIT=8GB og DUCKDB_THREADS=8 som miljøvariabler.
 """
-import os
 import sys
 import time
-from pathlib import Path
 
-import duckdb
-
+from common import DATA, SAMPLE_PCT, SPLITS, connect_duckdb, raw_files, raw_sql
 from history import baseline_select, build_oof, build_past_monthly, feature_select, join_sql
 
-ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
 
 # ---------- Rådata ----------
-# Månedsfiler i data/raw/ (fra retrieval.py) + ev. den gamle atb_2025.parquet i prosjektroten.
-raw_files = [f for f in sorted((DATA / "raw").glob("atb_*.parquet")) if f.stat().st_size > 10_000]  # hopp over tomme
-if (ROOT / "atb_2025.parquet").exists():
-    raw_files = [f for f in raw_files if not f.name.startswith("atb_2025")] + [ROOT / "atb_2025.parquet"]
-if not raw_files:
+RAW_FILES = raw_files()
+if not RAW_FILES:
     sys.exit("Fant ingen rådata. Kjør retrieval.py først.")
-RAW_SQL = "read_parquet([" + ", ".join(f"'{f.as_posix()}'" for f in raw_files) + "], union_by_name=true)"
+RAW_SQL = raw_sql(RAW_FILES)
 
-# Andel av turene som tas med i hver split (sampling på turnivå, så hele turer holdes samlet).
-# Samme hash som før, så testturene er de samme som i tidligere kjøringer.
-SAMPLE_PCT = {"train": 20, "valid": 25, "test": 25}
-SPLITS = {"train": ("2025-01-01", "2025-08-31"),
-          "valid": ("2025-09-01", "2025-10-31"),
-          "test":  ("2025-11-01", "2025-12-31")}
+# Utvalg (SAMPLE_PCT) og perioder (SPLITS) ligger i common.py, felles med realtime.py.
 P1_END, P2_END = "2025-08-31", "2025-10-31"                # slutt på treningsperiode / trening+valid
 HIST_MONTHS = [f"2025-{m:02d}-01" for m in range(1, 13)]   # måneder vi trenger baseline-historikk for
 
@@ -68,12 +55,7 @@ def log(msg, t0=None):
     print(msg + (f"  ({time.time() - t0:.0f}s)" if t0 else ""), flush=True)
 
 
-con = duckdb.connect(str(DATA / "features.duckdb"))
-con.execute(f"SET temp_directory='{(DATA / 'tmp').as_posix()}'")
-if os.environ.get("DUCKDB_MEMORY_LIMIT"):
-    con.execute(f"SET memory_limit='{os.environ['DUCKDB_MEMORY_LIMIT']}'")
-if os.environ.get("DUCKDB_THREADS"):
-    con.execute(f"SET threads={int(os.environ['DUCKDB_THREADS'])}")
+con = connect_duckdb(DATA / "features.duckdb")
 
 weather_path = DATA / "weather_trondheim.parquet"
 has_weather = weather_path.exists()
@@ -82,7 +64,7 @@ weather_join = (f"LEFT JOIN '{weather_path.as_posix()}' w ON w.time = date_trunc
 weather_cols = ("w.temperature_2m AS temp, w.precipitation AS precip, w.snowfall AS snowfall, "
                 "w.snow_depth AS snow_depth, w.wind_speed_10m AS wind, w.precip_3h AS precip_3h,"
                 if has_weather else "")
-log(f"Rådata: {', '.join(f.name for f in raw_files)}")
+log(f"Rådata: {', '.join(f.name for f in RAW_FILES)}")
 log(f"Værdata: {'ja' if has_weather else 'nei (kjør src/weather.py for å legge til)'}")
 
 holidays_sql = ", ".join(f"DATE '{d}'" for d in HOLIDAYS)

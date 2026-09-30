@@ -10,6 +10,14 @@ DATA, REPORTS, MODELS = ROOT / "data", ROOT / "reports", ROOT / "models"
 
 CAT = ["line", "stop", "direction"]
 
+# Utvalg og perioder, felles for features.py og realtime.py. Hvilke turer som havner i hvert utvalg
+# avgjøres av DuckDBs hash(journey_id) % 100 < SAMPLE_PCT (hele turer holdes samlet). hash() er ikke
+# garantert lik mellom DuckDB-versjoner, derfor er duckdb låst i requirements.txt.
+SAMPLE_PCT = {"train": 20, "valid": 25, "test": 25}
+SPLITS = {"train": ("2025-01-01", "2025-08-31"),
+          "valid": ("2025-09-01", "2025-10-31"),
+          "test":  ("2025-11-01", "2025-12-31")}
+
 # Kolonner som ikke er features: mål, dato, baseline-prognosen og id-/visningskolonner til appen
 NON_FEATURES = ("y", "date", "baseline", "journey_id", "stop_name", "origin_name", "dest_name")
 
@@ -26,6 +34,31 @@ LGB_PARAMS = dict(objective="l1", learning_rate=0.1, num_leaves=255, min_data_in
 if os.environ.get("LGB_DEVICE", "").lower() == "gpu":
     LGB_PARAMS.update(device_type="gpu", max_bin=63, gpu_use_dp=False)
     os.environ.setdefault("BOOST_COMPUTE_USE_OFFLINE_CACHE", "0")   # unngår feil i OpenCL-kernel-cachen når Windows ikke bruker UTF-8 (f.eks. japansk systemspråk)
+
+
+def raw_files():
+    """Rådata: månedsfiler i data/raw/ (fra retrieval.py) + ev. den eldre atb_2025.parquet i prosjektroten."""
+    files = [f for f in sorted((DATA / "raw").glob("atb_*.parquet")) if f.stat().st_size > 10_000]  # hopp over tomme
+    if (ROOT / "atb_2025.parquet").exists():
+        files = [f for f in files if not f.name.startswith("atb_2025")] + [ROOT / "atb_2025.parquet"]
+    return files
+
+
+def raw_sql(files):
+    """DuckDB-uttrykk som leser alle rådatafilene som én tabell."""
+    return "read_parquet([" + ", ".join(f"'{f.as_posix()}'" for f in files) + "], union_by_name=true)"
+
+
+def connect_duckdb(path):
+    """DuckDB-tilkobling med felles oppsett. Valgfritt: DUCKDB_MEMORY_LIMIT=8GB og DUCKDB_THREADS=8."""
+    import duckdb
+    con = duckdb.connect(str(path))
+    con.execute(f"SET temp_directory='{(DATA / 'tmp').as_posix()}'")
+    if os.environ.get("DUCKDB_MEMORY_LIMIT"):
+        con.execute(f"SET memory_limit='{os.environ['DUCKDB_MEMORY_LIMIT']}'")
+    if os.environ.get("DUCKDB_THREADS"):
+        con.execute(f"SET threads={int(os.environ['DUCKDB_THREADS'])}")
+    return con
 
 
 def ensure_dirs():
