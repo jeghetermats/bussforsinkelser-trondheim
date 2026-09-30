@@ -250,11 +250,8 @@ else:
             "Modell A (dagen før)": t.pred_lgbm.map(fmt_delay).to_numpy(),
             **({f"Modell B ({lead_label})": t.pred.map(fmt_delay).to_numpy()} if lead is not None else {}),
             "Historisk median": t.pred_baseline.map(fmt_delay).to_numpy(),
-            "Prognosens feil": (t.pred - t.y).map(fmt_delay).to_numpy(),
         })
         st.dataframe(table, hide_index=True, height=(len(table) + 1) * 35 + 3)   # ingen egen rullefelt
-        st.caption(f"Prognosens feil = {model_name} minus faktisk. Negativ betyr at bussen var mer forsinket "
-                   "enn antatt.")
 
 # ================= Mønstre og treffsikkerhet: to kort i bredden =================
 st.subheader("Mønstre og treffsikkerhet")
