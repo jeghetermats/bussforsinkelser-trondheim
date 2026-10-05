@@ -55,15 +55,18 @@ def fmt_clock(minute_of_day: int) -> str:
     return f"{m // 60:02d}:{m % 60:02d}"
 
 
-@st.cache_data(show_spinner="Laster testdata ...")
+# De store tabellene caches med cache_resource: én delt kopi for alle besøkende og omkjøringer.
+# cache_data lager en ny kopi ved hvert kall, og da gikk appen over minnegrensen på Streamlit Cloud.
+# Tabellene skal derfor bare leses, aldri endres på stedet (bruk .copy() ved behov).
+@st.cache_resource(show_spinner="Laster testdata ...")
 def load_predictions() -> pd.DataFrame:
     df = pd.read_parquet(_find("test_predictions.parquet"))
-    df["date"] = pd.to_datetime(df["date"]).dt.date
-    df["line_no"] = df["line"].astype(str).map(line_label)
+    # Linjenummer som kategori (noen hundre verdier), ikke 1,7 mill. Python-strenger
+    df["line_no"] = df["line"].cat.rename_categories(lambda c: line_label(c))
     return df
 
 
-@st.cache_data
+@st.cache_resource
 def load_trips() -> pd.DataFrame:
     """Én rad per tur: linje, retning, dato, avgangstid, fra/til."""
     df = load_predictions()
@@ -72,6 +75,8 @@ def load_trips() -> pd.DataFrame:
                     date=("date", "first"), start=("trip_start_min", "first"),
                     origin=("origin_name", "first"), dest=("dest_name", "first"))
                .reset_index())
+    trips["line_no"] = trips["line_no"].astype(str)
+    trips["date"] = pd.to_datetime(trips["date"]).dt.date
     trips["origin"] = trips["origin"].astype(str)
     trips["dest"] = trips["dest"].astype(str)
     return trips
@@ -100,11 +105,15 @@ def load_oracle() -> pd.DataFrame | None:
     return pd.read_csv(p) if p.exists() else None
 
 
-@st.cache_data(show_spinner="Laster sanntidsprognoser ...")
+@st.cache_resource(show_spinner="Laster sanntidsprognoser ...")
 def load_rt_predictions() -> pd.DataFrame | None:
-    """Modell B: én rad per (tur, stopp, lead). Kolonner trip, seq, lead_min, pred_rt, pred_rule."""
+    """Modell B: én rad per (tur, stopp, lead). Kolonner trip, seq, lead_min, pred_rt."""
     p = _find("rt_test_predictions.parquet")
-    return pd.read_parquet(p, columns=["trip", "seq", "lead_min", "pred_rt"]) if p.exists() else None
+    if not p.exists():
+        return None
+    rt = pd.read_parquet(p, columns=["trip", "seq", "lead_min", "pred_rt"])
+    rt["trip"] = rt["trip"].astype("int32")   # alle turer har id; vanlig int32 i stedet for nullbar Int32
+    return rt
 
 
 @st.cache_data
