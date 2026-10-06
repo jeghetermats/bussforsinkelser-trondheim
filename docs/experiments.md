@@ -3,7 +3,71 @@
 Detaljer bak resultatene i [README-en](../README.md): hvor mye som er mulig å oppnå, alle features i modell B,
 hvordan oppsettene ble valgt, og det som ikke virket. Alle valg er tatt på data før testperioden (nov-des 2025).
 
-## Modell A
+## Begreper
+
+- MAE: gjennomsnittlig absolutt feil, hvor mange sekunder prognosen bommer med i snitt.
+- RMSE: som MAE, men store bom teller mer.
+- Baseline: medianforsinkelsen for samme linje, stopp, retning, time og dagtype, beregnet fra alle tidligere måneder.
+- Lead: hvor mange minutter før planlagt avgang prognosen lages (modell B: 10, 30 eller 60).
+- Seed: startverdi for tilfeldigheten i treningen. Begge modellene er snitt av tre seeds, blandet litt med baselinen
+  (vekt valgt på validering: 0,85 for A og 0,95 for B).
+- KI: 95 % konfidensintervall, laget med bootstrap over testdagene.
+
+## Data og metode
+
+- Data: Entur sitt SIRI-ET-datasett for AtB, som finnes fra 3. desember 2024.
+- Mål: ankomstforsinkelse i sekunder ved hvert stopp (faktisk minus planlagt ankomst).
+- Tidsbasert splitt: trening jan-aug 2025, validering sep-okt (early stopping), test nov-des 2025.
+  Endelig modell retrenes på jan-okt. Desember 2024 brukes bare som historikk.
+- Historiske features (median/snitt/spredning per linje, stopp, time ...) beregnes i DuckDB over alle
+  ~43 mill. rader med fold-historikk: dagene deles i 5 folder, og hver treningsrad får statistikk fra de andre
+  4, så den aldri ser sin egen fasit. Test- og valideringsrader ser bare fortiden.
+- Modell: LightGBM med L1-tap (treffer medianen og minimerer gjennomsnittlig absolutt feil), snitt av tre seeds.
+- Rensing: fjerner kansellerte turer/stopp, ekstraturer, estimerte tider og åpenbare feil (< -30 / > +60 min).
+
+## Modell A i detalj
+
+| Modell | MAE | RMSE | Innen +/-1 min | Innen +/-2 min |
+|---|---|---|---|---|
+| Global median | 129,3 s | 211,6 s | 39,7 % | 67,8 % |
+| Historisk median (baseline) | 106,5 s | 181,9 s | 49,3 % | 72,5 % |
+| Modell A, én seed | 102,6 s | 170,6 s | 47,9 % | 73,1 % |
+| Modell A (snitt av 3 seeds + blanding) | 102,0 s | 170,9 s | 48,6 % | 73,5 % |
+
+- RMSE er 6 % lavere enn baselinen: modellen er best på de store bommene.
+- Innenfor +/-1 minutt er baselinen litt bedre (49,3 % mot 48,6 %). Medianen er skarpere på "normale" avganger.
+  Modell B er litt bedre enn baselinen her (50,1 %).
+- Modell A er svakere på nattbusser kl. 01-04 med få observasjoner.
+
+Rullende evaluering: for hver måned mars-desember trenes modellen bare på tidligere måneder og testes på måneden.
+
+![Rullende evaluering](../reports/rolling_eval.png)
+
+Enkeltmodellen er bedre i 7 av 10 måneder, i snitt 0,8 %, fra -0,8 % (september) til +3,3 % (november).
+
+## Usikkerhet og ytterligere evaluering
+
+`src/evaluate_extra.py`, test nov-des, modell B 30 min før avgang. Alle kalibreringer er gjort på validering.
+
+![Kalibrering og feil per dag](../reports/eval_extra.png)
+
+"Blir bussen mer enn 3 min forsinket?" (32,7 % av målingene i testen). Prognosen gjøres om til en
+sannsynlighet med logistisk regresjon på validering.
+
+| | AUC | Brier | Brier-skill mot bare andelen |
+|---|---|---|---|
+| Historisk median | 0,772 | 0,175 | 0,21 |
+| Modell A | 0,794 | 0,166 | 0,25 |
+| Modell B | 0,815 | 0,158 | 0,29 |
+
+80 %-prediksjonsintervaller (10.-90. persentil av feilen på validering) dekker 78-79 % av testen, stabilt i november
+og desember, med median bredde ~265 s.
+
+De ti dagene der baselinen bommet mest, er nesten alle i andre halvdel av november, med lite nedbør og snø.
+Værforholdene ser ikke ut til å forklare disse dagene alene. Det er her modellene tjener mest: A er 5,7 % og B 10,9 %
+bedre enn baselinen disse dagene, mot 2,9 % og 6,6 % de øvrige dagene. B er bedre enn A på 60 av 61 dager.
+
+## Modell A: seed-snitt, rullende evaluering og valg av oppsett
 
 ### Seed-snitt og blanding
 
@@ -139,3 +203,16 @@ Mesteparten av signalet er likevel fortsatt hvordan dagen går: 98,3 s ved 10 mi
 
 Å trene på avviket og roligere læring hjalp ikke og ble forkastet. Det finnes ingen måned-for-måned-kjøring over
 mars-okt for B (sanntidsfeaturene er bare bygget for de faste periodene), så her er valget tatt på sep-okt.
+
+## Flere begrensninger
+
+- Valget av oppsett for modell B er bare gjort på sep-okt, ikke måned for måned.
+- Modell B holder turen selv utenfor sanntidsfeaturene bare via tidspunktet: observasjoner må komme før
+  planlagt avgang minus lead minus 2 min. En buss som går over 12 min for tidlig fra første stopp, kan i
+  sjeldne tilfeller se sin egen observasjon (ved 10 min lead). Effekten er trolig ubetydelig.
+
+## Videre arbeid
+
+- Måned-for-måned-valg over mars-okt også for modell B.
+- Egne kvantilmodeller for intervallene i stedet for feil fra validering, og en egen klassifikator for > 3 min.
+- Trend-features (siste 7/28 dager, kun fra fortiden), værhendelser, hendelser i byen som kan påvirke tider.
