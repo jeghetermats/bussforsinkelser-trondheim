@@ -110,7 +110,7 @@ else:
               delta=f"{fmt_num(lgbm['innen_2min_%'] - base['innen_2min_%'], sign=True)} prosentpoeng mot baseline", border=True)
 if rolling is not None:
     wins = int((rolling.MAE_lgbm < rolling.MAE_baseline).sum())
-    k4.metric("Modell A bedre enn baseline", f"{wins} av {len(rolling)} måneder", delta="rullende test mars-des 2025",
+    k4.metric("Måneder modell A slo baseline", f"{wins} av {len(rolling)}", delta="rullende test mars-des 2025",
               delta_color="off", delta_arrow="off", border=True,
               help="Hver måned mars-des 2025 testet med en modell trent bare på tidligere måneder "
                    "(én seed, uten blanding).")
@@ -131,7 +131,7 @@ with st.container(border=True):
 
 # ================= Utforsk en tur: kontroller til venstre, graf til høyre =================
 st.subheader("Utforsk en tur fra testperioden")
-left, right = st.columns([1, 3])
+left, right = st.columns([1.2, 3])
 
 with left:
     with st.container(border=True):
@@ -221,7 +221,7 @@ else:
                 x=alt.X("stop_name:N", sort=t["stop_name"].astype(str).tolist(), title=None,
                         axis=alt.Axis(labelAngle=-40, labelLimit=130, labelOverlap=True)),
                 y=alt.Y("min:Q", title="Forsinkelse (minutter)", axis=alt.Axis(labelExpr=COMMA)),
-                domain=["Faktisk", model_label, "Historisk median"], height=540,
+                domain=["Faktisk", model_label, "Historisk median"], height=580,
                 tooltip=[alt.Tooltip("stop_name:N", title="Stopp"), alt.Tooltip("planlagt:N", title="Planlagt"),
                          alt.Tooltip("serie:N", title="Serie"), alt.Tooltip("tekst:N", title="Forsinkelse")],
             )
@@ -232,14 +232,13 @@ else:
         with st.container(border=True):
             card_title("Slik leser du grafen")
             st.markdown(
-                "- **Svart:** faktisk forsinkelse ved hvert stopp.\n"
-                "- **Blå:** modellens prognose. Modell A lager den dagen før, modell B 10–60 min før avgang.\n"
-                "- **Grå stiplet:** historisk median for samme linje, stopp, time og dagtype."
+                "- **Svart:** faktisk forsinkelse.\n"
+                "- **Blå:** prognosen fra valgt modell.\n"
+                "- **Grå stiplet:** historisk median."
             )
             st.caption(
-                "Modellen har ikke sett de svarte punktene når prognosen lages, og vet ikke hva som skjer på selve turen. "
-                "Når forsinkelsen bygger seg opp i trafikken, havner "
-                "den ofte under den faktiske linjen. Sanntid hjelper mest på dager der hele linjen går tregt."
+                "Prognosen lages før turen, så modellen vet ikke hva som skjer underveis. Når køen bygger seg opp, "
+                "havner den blå linjen ofte under den svarte."
             )
 
     with st.expander("Alle stopp på turen i tabell"):
