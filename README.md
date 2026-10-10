@@ -6,8 +6,8 @@ Hvor forsinket blir bussen ved hvert stopp, før turen har startet? Prosjektet b
 sanntidsmålinger fra Entur for AtB (desember 2024 til desember 2025) og sammenligner to LightGBM-modeller
 med en historisk median.
 
-**Resultat:** Med sanntidsdata 30 minutter før avgang bommer modellen 7,7 % mindre enn den historiske
-medianen, målt på to måneder den aldri har sett (95 % KI: 6,8-8,5 %).
+**Resultat:** Med sanntidsdata 30 minutter før avgang bommer modellen 7,8 % mindre enn den historiske
+medianen, målt på to måneder den aldri har sett (95 % KI: 7,0-8,6 %).
 
 Python · Google BigQuery · DuckDB · LightGBM · Streamlit · pytest · GitHub Actions
 
@@ -27,13 +27,15 @@ MAE er hvor mange sekunder prognosen bommer med i snitt.
 | Modell | Når prognosen lages | MAE | Forbedring mot baseline (95 % KI) |
 |---|---|---|---|
 | Historisk median (baseline) | | 106,5 s | |
-| Modell A | Dagen før | 102,0 s | 4,2 % [3,0-5,2] |
-| Modell B | 30 min før avgang, med sanntidsdata | 98,3 s | 7,7 % [6,8-8,5] |
+| Modell A | Dagen før | 101,9 s | 4,3 % [3,1-5,2] |
+| Modell B | 30 min før avgang, med sanntidsdata | 98,2 s | 7,8 % [7,0-8,6] |
 
-- **Sanntidsdata gir mest.** Modell B bommer 3,6 % mindre enn A. En kontrollmodell trent på samme måte, men
+- **Sanntidsdata gir mest.** Modell B bommer 3,7 % mindre enn A. En kontrollmodell trent på samme måte, men
   uten sanntidsdata, havner på nivå med A, så gevinsten kommer fra sanntidsdataene.
 - **Det viktigste signalet er hvordan dagen går** på samme linje de siste timene. Prognosen er nesten like god
   60 som 10 minutter før avgang.
+- **Gevinsten holder mot en strengere baseline.** Forsinkelsene steg gjennom høsten, så en median fra bare de
+  siste 8 ukene bommer 1,8 % mindre enn den vanlige. Mot den er A 2,6 % og B 6,2 % bedre (30 min før avgang).
 - **Mye er tilfeldig før avgang.** Et 80 %-intervall rundt prognosen er typisk rundt 4,5 minutter bredt.
 
 ## Hvordan det fungerer
@@ -52,19 +54,20 @@ MAE er hvor mange sekunder prognosen bommer med i snitt.
   Alle valg er tatt på validering, testen er bare brukt til endelig evaluering.
 - **Ingen datalekkasje:** historiske features ser aldri sin egen fasit, og modell B får bare data registrert
   minst 2 minutter før prognosen lages. Forsinkelsen ved forrige stopp er bevisst utelatt, siden den nesten gir svaret.
+  Dette sjekkes av tester som kjører pipelinen på oppdiktede data.
 - **Konfidensintervaller** med bootstrap over testdagene, i stedet for ett enkelt tall.
 - **Kontrollmodell og enkel regel** for å vise at det er sanntidsdataene, ikke modellen alene, som gir gevinsten.
 - **Rullende evaluering:** modell A trent bare på tidligere måneder og testet måned for måned (mars-desember).
   Den slår baselinen i 7 av 10 måneder, i snitt med 0,8 %.
 - **Ablasjon:** endringer i oppsettet testet én om gangen for å finne ut hva som faktisk hjalp.
 
-Detaljer om oppsett, alle features, ablasjonen, usikkerhet og det som ikke virket finnes i
-[docs/experiments.md](docs/experiments.md).
+Detaljer om oppsett, alle features, ablasjonen, usikkerhet, kontroller av evalueringen og det som ikke virket finnes
+i [docs/experiments.md](docs/experiments.md).
 
 ## Begrensninger
 
 - Før avgang er mye av forsinkelsen tilfeldig, så forbedringen over en god historisk median er moderat.
-- Værdata er målt vær, ikke værvarsel.
+- Værdata er målt vær, ikke værvarsel (`src/weather.py --forecast` henter varselet fra dagen før i stedet).
 - Modell B bruker de endelige registrerte tidene. Den ekte sanntidsstrømmen kan komme senere eller bli rettet
   i ettertid, og bufferen på 2 minutter dekker bare en del av det.
 - Datasettet mangler kjøretøy-id, så bussen som skal kjøre turen finnes bare for rundt 10 % av turene.
@@ -81,13 +84,21 @@ streamlit run app/streamlit_app.py
 Tester (kjøres også automatisk med GitHub Actions ved hver push, sammen med `ruff`):
 
 ```bash
-pip install -r app/requirements.txt pytest==9.1.1 ruff==0.16.9
+pip install -r app/requirements.txt duckdb==1.5.5 pytest==9.1.1 ruff==0.16.9
 ruff check .
 pytest
 ```
 
+Lekkasjetestene (`tests/test_history.py`, `tests/test_pipeline_leakage.py`) kjører `features.py` og
+`realtime.py` på små, oppdiktede data i en midlertidig mappe (`DATA_DIR`). De endrer fasiten i data en rad ikke
+skal kunne se (radens egen dag, framtiden, alt etter prognosetidspunktet) og sjekker at radens features er de samme.
+`tests/test_readme_numbers.py` sjekker at tallene i README og `docs/experiments.md` stemmer med `reports/`.
+
 <details>
 <summary>Hent data, tren og evaluer</summary>
+
+Alt etter at rådata og vær er hentet, i riktig rekkefølge og med tester før og etter: `python run_all.py`
+(`--list` viser stegene, `--from <steg>` fortsetter etter en feil, `--checks` tar med kontrollene av evalueringen).
 
 ```bash
 pip install -r requirements.txt
@@ -98,10 +109,12 @@ python src/weather.py             # timesvær fra Open-Meteo
 python src/features.py            # DuckDB: rensing, historikk over alle rader, train/valid/test
 
 python src/train.py               # modell A + test nov-des (+ bootstrap-KI)
+python src/importance.py          # permutasjonsviktighet for modell A (vises i appen)
 python src/rolling_eval.py        # rullende evaluering mars-des
-python src/ensemble.py            # seed-snitt og blanding (A og B), vekt valgt på sep-okt
+python src/ensemble.py            # modell A: seed-snitt og blanding med baselinen, vekt valgt på sep-okt
 python src/realtime.py            # modell B: sanntidsfeatures -> data/rt_*.parquet
 python src/select_rt.py           # modell B: valg av variant på sep-okt
+python src/train_rt.py --r1       # modell B runde 1 (til sammenligningen runde 2 mot runde 1)
 python src/train_rt.py            # modell B: 3 seeds + test per lead (--no-rt = kontroll uten sanntid)
 python src/finalize.py            # endelige tall (reports/final.json) og A-prognosene til appen
 python src/oracle.py              # orakel-analyse (etter finalize)
@@ -109,6 +122,8 @@ python src/rt_breakdown.py        # B mot A per lead og posisjon på ruten
 python src/evaluate_extra.py      # > 3 min (AUC/Brier), 80 %-intervaller, verste dager
 python src/ablation.py            # ablasjon (valgfritt, flere timer)
 python src/ablation.py --cv --seeds 0,1   # valg av oppsett over mars-okt (valgfritt)
+python src/check_trip_structure.py        # avslører turstrukturen noe om forsinkelsen? (valgfritt)
+python src/rolling_eval.py --refit --min-rounds 100   # rullende evaluering som hovedmodellen (valgfritt)
 ```
 
 </details>

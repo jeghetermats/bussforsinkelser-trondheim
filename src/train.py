@@ -4,6 +4,8 @@ Trener og evaluerer modellen for forsinkelse før avgang.
   Baseline 0: median forsinkelse i treningsdata (én konstant)
   Baseline 1: historisk median per (linje, stopp, retning, time, dagtype), med fallback
               - fra alle rader før radens måned (oppdatert månedlig), ferdig beregnet i features.py
+  Baseline 2: samme median, men bare fra de siste 8 ukene før radens måned (kontroll: følger nivået, som
+              stiger gjennom høsten). Brukes ikke av modellen.
   Modell    : LightGBM (L1-tap) med kalender, vær og historiske features (fold-historikk, se history.py).
               Early stopping på valid (sep-okt), deretter retrent på jan-okt med fold-historikk over
               jan-okt, og testet på nov-des 2025 med historikk kun fra data t.o.m. oktober.
@@ -24,8 +26,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import (CAT, LGB_PARAMS, MODELS, REPORTS, bootstrap_mae_gain, ensure_dirs, feature_columns, load,
-                    metrics, set_categories, use_refit_history)
+from common import (CAT, LGB_PARAMS, MODELS, REPORTS, TEST_PERIOD, bootstrap_mae_gain, dataset_meta, ensure_dirs,
+                    feature_columns, load, metrics, period_label, set_categories, use_refit_history)
 
 QUICK = "--quick" in sys.argv
 EVAL_ONLY = "--eval-only" in sys.argv
@@ -90,16 +92,31 @@ results = {
     "Baseline 1 - historisk median per linje/stopp/time/dagtype": metrics(y, pred_b1),
     "LightGBM": metrics(y, pred_lgb),
 }
-boot = bootstrap_mae_gain(test.date.to_numpy(), y, pred_lgb, pred_b1)
-results["_info"] = {"quick_mode": QUICK, "test_periode": "2025-11-01 - 2025-12-31", "n_test": int(len(y)),
+dates = test.date.to_numpy()
+boot = bootstrap_mae_gain(dates, y, pred_lgb, pred_b1)
+results["_info"] = {"quick_mode": QUICK, "test_periode": TEST_PERIOD, "n_test": int(len(y)),
                     "n_train": int(len(full)), "best_iter": int(best_iter), "valid_MAE_s": valid_mae,
-                    "mae_forbedring_mot_baseline": boot, "features": FEATURES}
+                    "mae_forbedring_mot_baseline": boot,
+                    # samme, men med hele uker som trekkenhet (dagene henger sammen, se bootstrap_mae_gain)
+                    "mae_forbedring_mot_baseline_ukeblokker": bootstrap_mae_gain(dates, y, pred_lgb, pred_b1,
+                                                                                 block="week"),
+                    "features": FEATURES, "datasett": dataset_meta("features")}
+if "baseline_recent" in test:      # baseline 2: bare de siste 8 ukene (finnes i datasett bygget av den nye features.py)
+    pred_b2 = test.baseline_recent.to_numpy(dtype="float64")
+    results["Baseline 2 - historisk median siste 8 uker"] = metrics(y, pred_b2)
+    results["_info"]["mae_forbedring_mot_baseline_8uker"] = bootstrap_mae_gain(dates, y, pred_lgb, pred_b2)
 (REPORTS / f"metrics{SUFFIX}.json").write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
 
-print("\nResultater på test (nov-des 2025):")
+print(f"\nResultater på test ({period_label('test')}):")
 print(pd.DataFrame({k: v for k, v in results.items() if not k.startswith("_")}).T.round(1).to_string())
 print(f"\nMAE-forbedring mot baseline: {boot['forbedring_%']:.1f} % "
       f"(95 % KI {boot['ci95_lav_%']:.1f}-{boot['ci95_høy_%']:.1f} %, bootstrap over {boot['dager']} dager)")
+bw = results["_info"]["mae_forbedring_mot_baseline_ukeblokker"]
+print(f"  med hele uker som trekkenhet: 95 % KI {bw['ci95_lav_%']:.1f}-{bw['ci95_høy_%']:.1f} % ({bw['uker']} uker)")
+if "mae_forbedring_mot_baseline_8uker" in results["_info"]:
+    b8 = results["_info"]["mae_forbedring_mot_baseline_8uker"]
+    print(f"MAE-forbedring mot median siste 8 uker: {b8['forbedring_%']:.1f} % "
+          f"(95 % KI {b8['ci95_lav_%']:.1f}-{b8['ci95_høy_%']:.1f} %)")
 
 # ---------- Filer til Streamlit-appen ----------
 imp = pd.Series(model.feature_importance("gain"), index=FEATURES).sort_values()
@@ -124,6 +141,6 @@ plt.tight_layout(); plt.savefig(REPORTS / f"feature_importance{SUFFIX}.png", dpi
 by_hour = pd.DataFrame({"hour": test.hour, "b1": np.abs(pred_b1 - y), "lgb": np.abs(pred_lgb - y)}).groupby("hour").mean()
 ax = by_hour.rename(columns={"b1": "Historisk median", "lgb": "LightGBM"}).plot(
     figsize=(8, 4), marker="o", color=["#999999", "#1F4E79"])
-ax.set_xlabel("Time på døgnet"); ax.set_ylabel("MAE (sekunder)"); ax.set_title("Feil per time - test nov-des 2025")
+ax.set_xlabel("Time på døgnet"); ax.set_ylabel("MAE (sekunder)"); ax.set_title(f"Feil per time - test {period_label('test')}")
 plt.tight_layout(); plt.savefig(REPORTS / f"mae_per_hour{SUFFIX}.png", dpi=130); plt.close()
 print(f"\nLagret resultater, prognoser og figurer i reports/ (suffiks: '{SUFFIX}')")

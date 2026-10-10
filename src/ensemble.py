@@ -1,5 +1,8 @@
 """
-Seed-snitt og blanding med baselinen, for modell A og B.
+Seed-snitt og blanding med baselinen for modell A (og for B, bare til sammenligning).
+
+finalize.py bruker blandingen bare for modell A. Den endelige modell B er seed-snittet fra train_rt.py, uten
+blanding; vekten som velges for B her brukes ikke.
 
   1. Tren hver modell med flere seeds (samme protokoll som train.py / train_rt.py:
      early stopping på valid sep-okt, retrening på jan-okt). Seed 42 er den vanlige modellen.
@@ -9,24 +12,30 @@ Seed-snitt og blanding med baselinen, for modell A og B.
      (V4, 1 mill. treningsrader, 2 seeds) - samme idé, men mindre modeller.
 
 Resultat: reports/ensemble.csv (test nov-des) og reports/ensemble.json (valgte w, KI).
-Prognoser per seed lagres i data/ens/, så en avbrutt kjøring fortsetter der den slapp.
+Prognoser per seed lagres i data/ens/, så en avbrutt kjøring fortsetter der den slapp. De gjenbrukes bare hvis
+valid- og testradene er de samme og i samme rekkefølge (fingeravtrykk) og features, parametre og datasett er
+uendret (signatur); ellers trenes seeden på nytt.
 
-Kjør:  python src/ensemble.py                 (A og B, seeds 42,1,2)
+Kjør:  python src/ensemble.py                 (modell A, seeds 42,1,2 - det finalize.py bruker)
+       python src/ensemble.py --model A,B       (også B, etter realtime.py; bare til sammenligning)
        python src/ensemble.py --model A --seeds 42,1
+Modeller som mangler datasett (f.eks. B før realtime.py er kjørt) hoppes over med en melding.
 """
 import argparse
 import json
+import sys
 import time
 
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from common import (CAT, DATA, LGB_PARAMS, REPORTS, bootstrap_mae_gain, ensure_dirs, feature_columns, load,
-                    metrics, set_categories, use_refit_history)
+from common import (CAT, CV_MONTHS, DATA, LGB_PARAMS, REPORTS, bootstrap_mae_gain, cache_ok, dataset_meta,
+                    ensure_dirs, feature_columns, fingerprint, load, metrics, period_label, save_npz, set_categories,
+                    signature, use_refit_history)
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--model", default="A,B")
+ap.add_argument("--model", default="A")
 ap.add_argument("--seeds", default="42,1,2")
 args = ap.parse_args()
 SEEDS = [int(s) for s in args.seeds.split(",")]
@@ -34,7 +43,7 @@ W_GRID = np.round(np.arange(0.5, 1.201, 0.05), 2)
 ENS = DATA / "ens"
 ENS.mkdir(exist_ok=True)
 ensure_dirs()
-SPLITS = {"A": ("train", "valid", "test"), "B": ("rt_train", "rt_valid", "rt_test")}
+DATASETS = {"A": ("train", "valid", "test"), "B": ("rt_train", "rt_valid", "rt_test")}
 
 
 def mae(p, y):
@@ -47,14 +56,18 @@ def best_w(p, b, y):
 
 
 def train_seeds(model):
-    s_tr, s_va, s_te = SPLITS[model]
-    todo = [s for s in SEEDS if not (ENS / f"{model}_s{s}.npz").exists()]
+    s_tr, s_va, s_te = DATASETS[model]
     t0 = time.time()
     train, valid, test = load(s_tr), load(s_va), load(s_te)
     set_categories(train, valid, test)
     feats = feature_columns(train)
     print(f"[{model}] train {len(train):,}  valid {len(valid):,}  test {len(test):,}  ({time.time()-t0:.0f}s)",
           flush=True)
+    fp_valid, fp_test = fingerprint(valid), fingerprint(test)
+    sig = {s: signature(model, feats, dict(LGB_PARAMS, seed=s), fingerprint(train), len(train),
+                        dataset_meta("features" if model == "A" else "realtime")) for s in SEEDS}
+    todo = [s for s in SEEDS
+            if not cache_ok(ENS / f"{model}_s{s}.npz", fp_valid=fp_valid, fp_test=fp_test, sig=sig[s])]
     if todo:
         full = use_refit_history(pd.concat([train, valid], ignore_index=True))
     for seed in todo:
@@ -69,7 +82,8 @@ def train_seeds(model):
         del dtr, m
         m = lgb.train(params, lgb.Dataset(full[feats], full.y, categorical_feature=CAT), num_boost_round=best)
         pt = m.predict(test[feats])
-        np.savez(ENS / f"{model}_s{seed}.npz", valid=pv.astype("float32"), test=pt.astype("float32"), best=best)
+        save_npz(ENS / f"{model}_s{seed}.npz", valid=pv.astype("float32"), test=pt.astype("float32"), best=best,
+                 fp_valid=fp_valid, fp_test=fp_test, sig=sig[seed])
         print(f"[{model}] seed {seed}: {best} trær, valid-MAE {mae(pv, valid.y):.2f}, "
               f"test-MAE {mae(pt, test.y):.2f}  ({time.time()-t0:.0f}s)", flush=True)
     keep = ["y", "baseline", "date"] + (["lead_min"] if model == "B" else [])
@@ -106,7 +120,7 @@ def evaluate(model, valid, test):
 def cv_check():
     """Samme spørsmål over mars-okt fra ablasjonens måned-for-måned-kjøringer (V4, 2 seeds)."""
     files = {m: [DATA / "ablation" / "cv" / f"V4_{m}_s{s}_n1000000.npz" for s in (0, 1)]
-             for m in pd.period_range("2025-03", "2025-10", freq="M").astype(str)}
+             for m in (c[:7] for c in CV_MONTHS)}
     if not all(f.exists() for fs in files.values() for f in fs):
         return None
     y, b, p0, p1 = [], [], [], []
@@ -121,20 +135,27 @@ def cv_check():
 
 
 all_rows, report = [], {}
-for model in [m for m in args.model.split(",") if m in SPLITS]:
+for model in [m for m in args.model.split(",") if m in DATASETS]:
+    missing = [s for s in DATASETS[model] if not (DATA / f"{s}.parquet").exists()]
+    if missing:
+        script = "src/features.py" if model == "A" else "src/realtime.py"
+        print(f"[{model}] hopper over: mangler data/{missing[0]}.parquet (kjør {script} først)", flush=True)
+        continue
     valid, test = train_seeds(model)
     rows, info = evaluate(model, valid, test)
     all_rows += rows
     report[model] = info
+if not report:
+    sys.exit("Ingen modeller å kjøre.")
 report["cv_mars_okt_V4_1mill"] = cv_check()
 
 res = pd.DataFrame(all_rows)
 res.to_csv(REPORTS / "ensemble.csv", index=False)
 (REPORTS / "ensemble.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-print("\nMAE (s), test nov-des 2025:")
+print(f"\nMAE (s), test {period_label('test')}:")
 print(res.pivot_table(index=["modell", "metode"], columns="lead", values="MAE_s", sort=False).round(2).to_string())
 for model in report:
-    if model in SPLITS:
+    if model in DATASETS:
         info = report[model]
         print(f"\n[{model}] w valgt på valid: {info['w_valgt_på_valid']}, trær per seed: {info['trær']}")
         for g, bb in info["bootstrap"].items():

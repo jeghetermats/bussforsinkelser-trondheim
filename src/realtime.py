@@ -26,7 +26,8 @@ Runde 2 - knyttet til hvor på ruten og hvilken buss:
                       (sannsynligvis bussen som kjører turen): planlagt pause, siste kjente forsinkelse,
                       hvor langt den har kommet og pausen som er igjen etter forsinkelsen
 
-Utvalg og historikk er de samme som i features.py (samme turer, samme fold-historikk).
+Utvalg og historikk er de samme som i features.py (samme turer, samme fold-historikk; HIST_FOLDS og HIST_AFTER
+leses fra data/features_meta.json, så de følger det features.py ble kjørt med).
 Trening/valid: én tilfeldig lead per tur (5-90 min, fast hash). Test: hver rad med lead 10, 30 og 60.
 
 Resultat: data/rt_train.parquet, rt_valid.parquet, rt_test.parquet
@@ -34,24 +35,42 @@ Tabeller: data/realtime.duckdb (features.duckdb åpnes bare for lesing).
 
 Kjør:  python src/realtime.py
 Valgfritt (testing): RT_FROM/RT_TO=YYYY-MM-DD begrenser datoene, RT_SPLITS=test, RT_DB=sti
+Variant: RT_INCOMING=alle   innkommende buss kan også være en annen linje som ender ved startholdeplassen (brukes
+                            når samme linje ikke har en tur som ender der innen IN_MAX_GAP), med flagget
+                            rt_in_same_line (1 = samme linje, 0 = annen linje). Standard: linje (bare samme linje).
 """
 import os
 import time
 from pathlib import Path
 
-from common import DATA, SAMPLE_PCT, SPLITS, connect_duckdb, raw_files, raw_sql
-from history import baseline_select, feature_select, join_sql
+from common import (DATA, P1_END, P2_END, SAMPLE_PCT, SPLITS, connect_duckdb, dataset_meta, raw_files, raw_sql,
+                    split_hash_sql, write_dataset_meta)
+from history import baseline_select, feature_select, fold_expr, join_sql, oof_name
 
 IN_MAX_GAP = 90                     # innkommende buss: maks planlagt pause (min) før vi regner den som ukjent
 BUFFER_MIN = 2                      # rapporteringsforsinkelse vi antar i sanntidsstrømmen
 TEST_LEADS = [10, 30, 60]
 LEAD_MIN, LEAD_MAX = 5, 90          # lead-intervall for trening/valid
-P1, P2, PAST = "f.hoof_20250831", "f.hoof_20251031", "f.hpast"   # bygget av features.py
-FOLD = "dayofyear(c.date) % 5"
+FEATURES_META = dataset_meta("features")          # oppsettet features.py ble kjørt med
+HIST_FOLDS = FEATURES_META.get("HIST_FOLDS", "day")
+HIST_AFTER = FEATURES_META.get("HIST_AFTER", "frozen")
+SPLIT_HASH = FEATURES_META.get("SPLIT_HASH", "duckdb")
+for k, v in (("HIST_FOLDS", HIST_FOLDS), ("HIST_AFTER", HIST_AFTER), ("SPLIT_HASH", SPLIT_HASH)):
+    if os.environ.get(k, v) != v:
+        raise SystemExit(f"{k}={os.environ[k]}, men features.py ble kjørt med {k}={v}. Kjør features.py på nytt.")
+RT_INCOMING = os.environ.get("RT_INCOMING", "linje")
+if RT_INCOMING not in ("linje", "alle"):
+    raise SystemExit("RT_INCOMING må være linje eller alle")
+P1 = "f." + oof_name(P1_END, HIST_FOLDS)     # bygget av features.py
+P2 = "f." + oof_name(P2_END, HIST_FOLDS)
+PAST = "f.hpast"
+FOLD = fold_expr("c.date", HIST_FOLDS)
 MONTH = "date_trunc('month', c.date)::DATE"
+AFTER_P1 = (P1, "5", "") if HIST_AFTER == "frozen" else (PAST, MONTH, "")
+AFTER_P2 = (P2, "5", "") if HIST_AFTER == "frozen" else (PAST, MONTH, "")
 PLANS = {"train": [(P1, FOLD, ""), (P2, FOLD, "refit_")],
-         "valid": [(P1, "5", ""), (P2, FOLD, "refit_")],
-         "test":  [(P2, "5", "")]}
+         "valid": [AFTER_P1, (P2, FOLD, "refit_")],
+         "test":  [AFTER_P2]}
 
 D_FROM, D_TO = os.environ.get("RT_FROM"), os.environ.get("RT_TO")
 RUN_SPLITS = os.environ.get("RT_SPLITS", "train,valid,test").split(",")
@@ -125,10 +144,23 @@ for name, keys, minutes, val in [("cum_ld", ["line", "direction"], 5, "anom"),
            sum(n) OVER w AS cn, sum(na) OVER w AS cna, sum(sa) OVER w AS csa
     FROM b WINDOW w AS ({part}ORDER BY t ROWS UNBOUNDED PRECEDING)
     """)
-con.execute("CREATE OR REPLACE TABLE obs_ld AS SELECT line, direction, obs_ts, anom FROM obs WHERE anom IS NOT NULL")
-con.execute("CREATE OR REPLACE TABLE obs_stop AS "
-            "SELECT line, direction, stop, obs_ts, anom FROM obs WHERE anom IS NOT NULL")
-con.execute("CREATE OR REPLACE TABLE obs_j AS SELECT journey_id, obs_ts, y, seq FROM obs")
+# Tabellene til ASOF-oppslagene har én rad per nøkkel og tidspunkt. Flere observasjoner med nøyaktig samme
+# tidspunkt ville ellers gitt et tilfeldig valg mellom dem, og ulike features fra kjøring til kjøring.
+# Ved like tidspunkt brukes observasjonen fra turen med høyest id (og høyest seq).
+con.execute("""CREATE OR REPLACE TABLE obs_ld AS SELECT line, direction, obs_ts, anom FROM obs
+               WHERE anom IS NOT NULL
+               QUALIFY row_number() OVER (PARTITION BY line, direction, obs_ts ORDER BY journey_id DESC, seq DESC) = 1""")
+con.execute("""CREATE OR REPLACE TABLE obs_stop AS SELECT line, direction, stop, obs_ts, anom FROM obs
+               WHERE anom IS NOT NULL
+               QUALIFY row_number() OVER (PARTITION BY line, direction, stop, obs_ts
+                                          ORDER BY journey_id DESC, seq DESC) = 1""")
+con.execute("""CREATE OR REPLACE TABLE obs_j AS SELECT journey_id, obs_ts, y, seq FROM obs
+               QUALIFY row_number() OVER (PARTITION BY journey_id, obs_ts ORDER BY seq DESC) = 1""")
+con.execute("""CREATE OR REPLACE TABLE trip_end AS SELECT * FROM trip_ts
+               QUALIFY row_number() OVER (PARTITION BY line, dest_name, trip_end_ts ORDER BY journey_id DESC) = 1""")
+if RT_INCOMING == "alle":
+    con.execute("""CREATE OR REPLACE TABLE trip_end_any AS SELECT * FROM trip_ts
+                   QUALIFY row_number() OVER (PARTITION BY dest_name, trip_end_ts ORDER BY journey_id DESC) = 1""")
 log("Kumulative tabeller ferdig", t0)
 
 
@@ -170,7 +202,8 @@ for split in RUN_SPLITS:
         lead_col = "l.lead_min"
     else:
         lead_sql = ""
-        lead_col = f"({LEAD_MIN} + hash(c.journey_id || '#lead') % {LEAD_MAX - LEAD_MIN + 1})::INTEGER"
+        lead_hash = split_hash_sql("c.journey_id || '#lead'", LEAD_MAX - LEAD_MIN + 1, SPLIT_HASH)
+        lead_col = f"({LEAD_MIN} + {lead_hash})::INTEGER"
     # 3a. Rader med historikk, lead og tidspunktet T vi har data fram til
     con.execute(f"""
     CREATE OR REPLACE TEMP TABLE q AS
@@ -189,19 +222,39 @@ for split in RUN_SPLITS:
     j_ld, c_ld = window_feats("cum_ld", "tr", ["line", "direction"], [20, 60, 180], "ld")
     j_net, c_net = window_feats("cum_net", "tr", [], [15, 60], "net")
     c_net = c_net.replace("rt_net_n60", "rt_net_n60_unused")   # antall siste 15 min holder
+    any_cols, any_join = "", ""
+    if RT_INCOMING == "alle":   # også siste tur fra en annen linje som ender ved startholdeplassen
+        any_cols = (", inc2.journey_id AS in2_journey, inc2.trip_end_ts AS in2_end, inc2.n_stops AS in2_n_stops, "
+                    "(inc2.line = tr.line)::INT AS in2_same")
+        any_join = ("ASOF LEFT JOIN trip_end_any inc2 ON inc2.dest_name = tr.origin_stopname "
+                    "AND inc2.trip_end_ts < tr.trip_start_ts")
     con.execute(f"""
     CREATE OR REPLACE TEMP TABLE trip_feats0 AS
     SELECT tr.journey_id, tr.lead_min, tr.T, tr.trip_start_ts, {c_ld}, {c_net},
            last.anom AS rt_ld_last_anom,
            (date_diff('second', last.obs_ts, tr.T) / 60.0)::FLOAT AS rt_ld_last_age_min,
-           inc.journey_id AS in_journey, inc.trip_end_ts AS in_end, inc.n_stops AS in_n_stops
+           inc.journey_id AS in_journey, inc.trip_end_ts AS in_end, inc.n_stops AS in_n_stops {any_cols}
     FROM (SELECT DISTINCT journey_id, lead_min, line, direction, T, trip_start_ts, origin_stopname FROM q) tr
     {j_ld}
     {j_net}
     ASOF LEFT JOIN obs_ld last ON last.line = tr.line AND last.direction = tr.direction AND last.obs_ts <= tr.T
-    ASOF LEFT JOIN trip_ts inc ON inc.line = tr.line AND inc.dest_name = tr.origin_stopname
+    ASOF LEFT JOIN trip_end inc ON inc.line = tr.line AND inc.dest_name = tr.origin_stopname
                                AND inc.trip_end_ts < tr.trip_start_ts
+    {any_join}
     """)
+    ok1 = f"date_diff('minute', in_end, trip_start_ts) <= {IN_MAX_GAP}"
+    if RT_INCOMING == "alle":   # samme linje først, ellers en annen linje
+        ok2 = f"date_diff('minute', in2_end, trip_start_ts) <= {IN_MAX_GAP}"
+        chosen = f"""(SELECT * EXCLUDE (in2_journey, in2_end, in2_n_stops, in2_same)
+                             REPLACE (CASE WHEN {ok1} THEN in_journey WHEN {ok2} THEN in2_journey END AS in_journey,
+                                      CASE WHEN {ok1} THEN in_end WHEN {ok2} THEN in2_end END AS in_end,
+                                      CASE WHEN {ok1} THEN in_n_stops WHEN {ok2} THEN in2_n_stops END AS in_n_stops),
+                             (CASE WHEN {ok1} THEN 1 WHEN {ok2} THEN in2_same END)::FLOAT AS rt_in_same_line
+                      FROM trip_feats0)"""
+    else:
+        chosen = f"""(SELECT * REPLACE (CASE WHEN {ok1} THEN in_journey END AS in_journey,
+                                       CASE WHEN {ok1} THEN in_end END AS in_end)
+                      FROM trip_feats0)"""
     # Innkommende buss: siste kjente forsinkelse før T
     con.execute(f"""
     CREATE OR REPLACE TEMP TABLE trip_feats AS
@@ -211,11 +264,7 @@ for split in RUN_SPLITS:
            (date_diff('second', o.obs_ts, tf.T) / 60.0)::FLOAT AS rt_in_age_min,
            (o.seq / tf.in_n_stops::DOUBLE)::FLOAT AS rt_in_progress,
            (date_diff('second', tf.in_end, tf.trip_start_ts) / 60.0 - o.y / 60.0)::FLOAT AS rt_in_slack_min
-    FROM (SELECT * REPLACE (CASE WHEN date_diff('minute', in_end, trip_start_ts) <= {IN_MAX_GAP}
-                                 THEN in_journey END AS in_journey,
-                            CASE WHEN date_diff('minute', in_end, trip_start_ts) <= {IN_MAX_GAP}
-                                 THEN in_end END AS in_end)
-          FROM trip_feats0) tf
+    FROM {chosen} tf
     ASOF LEFT JOIN obs_j o ON o.journey_id = tf.in_journey AND o.obs_ts <= tf.T
     """)
     # 3c. Features per stopp (alle linjer) og ferdig datasett
@@ -252,4 +301,7 @@ for split in RUN_SPLITS:
     n = con.sql(f"SELECT count(*) FROM '{out.as_posix()}'").fetchone()[0]
     log(f"{split:5s}: {n:,} rader -> {out.name}", t0)
 
-log("Ferdig.")
+# Lagrede prognoser i data/ens/ knyttes til dette byggetidspunktet (også delvise ombygginger med RT_SPLITS)
+write_dataset_meta("realtime", splits=RUN_SPLITS, RT_FROM=D_FROM, RT_TO=D_TO, RT_INCOMING=RT_INCOMING,
+                   HIST_FOLDS=HIST_FOLDS, HIST_AFTER=HIST_AFTER, SPLIT_HASH=SPLIT_HASH)
+log(f"Ferdig. {DB.name} brukes ikke av de andre skriptene og kan slettes for å spare plass.")

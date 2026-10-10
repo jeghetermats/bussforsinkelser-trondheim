@@ -1,5 +1,6 @@
 # Versjonene er låst: hvilke turer som havner i trening/valid/test avgjøres av DuckDBs hash(),
-# som ikke er garantert lik mellom DuckDB-versjoner. Brukt med Python 3.14.
+# som ikke er garantert lik mellom DuckDB-versjoner (SPLIT_HASH=md5 gir en fordeling som er lik i alle
+# versjoner, men andre turer enn de publiserte resultatene). Brukt med Python 3.14.
 google-cloud-bigquery==3.45.2
 google-cloud-bigquery-storage==2.41.0
 db-dtypes==1.7.1

@@ -11,6 +11,7 @@ __pycache__/
 reports/*_quick*
 
 reports/*_log.txt
+logs/
 
 # Test- og lintcache
 .pytest_cache/

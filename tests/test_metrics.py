@@ -50,3 +50,24 @@ def test_bootstrap_er_reproduserbar():
     dates, y, rng = _data()
     p, q = y + rng.normal(0, 60, len(y)), y + rng.normal(0, 70, len(y))
     assert bootstrap_mae_gain(dates, y, p, q) == bootstrap_mae_gain(dates, y, p, q)
+
+
+def _width(b):
+    return b["ci95_høy_%"] - b["ci95_lav_%"]
+
+
+def test_bootstrap_uker_gir_bredere_intervall_naar_dagene_henger_sammen():
+    """Når gevinsten varierer fra uke til uke (dagene i en uke ligner hverandre), skal ukeblokker gi et bredere
+    intervall enn dager, med samme punktestimat."""
+    rng = np.random.default_rng(3)
+    days = pd.date_range("2025-11-03", periods=56)                   # 8 hele uker
+    week_effect = rng.normal(0, 25, 8)                               # modellens fordel varierer per uke
+    dates = np.repeat(days.to_numpy(), 300)
+    y = rng.normal(100, 50, len(dates))
+    noise_model = 60 + np.repeat(week_effect, 7 * 300)
+    model = y + rng.normal(0, 1, len(y)) * np.clip(noise_model, 5, None)
+    base = y + rng.normal(0, 70, len(y))
+    day, week = bootstrap_mae_gain(dates, y, model, base), bootstrap_mae_gain(dates, y, model, base, block="week")
+    assert week["forbedring_%"] == pytest.approx(day["forbedring_%"])
+    assert week["uker"] == 8 and week["dager"] == day["dager"] == 56
+    assert _width(week) > 1.3 * _width(day)

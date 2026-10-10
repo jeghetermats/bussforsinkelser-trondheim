@@ -21,10 +21,11 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from common import CAT, DATA, LGB_PARAMS, REPORTS, bootstrap_mae_gain, ensure_dirs, feature_columns, load, \
-    set_categories
+from common import (CAT, DATA, LGB_PARAMS, REPORTS, RT_ROUND2, bootstrap_mae_gain, cache_ok, dataset_meta,
+                    ensure_dirs, feature_columns, fingerprint, load, period_label, save_npz, set_categories,
+                    signature)
 
-ROUND2 = ("rt_prev_", "rt_seg_", "rt_segcum", "rt_segcov", "rt_in_")
+ROUND2 = RT_ROUND2
 VARIANTS = {
     "R1": dict(round2=False, resid=False),
     "R2": dict(round2=True, resid=False),
@@ -45,16 +46,23 @@ train, valid = load("rt_train"), load("rt_valid")
 set_categories(train, valid)
 ALL = feature_columns(train)
 print(f"Lest inn: train {len(train):,}  valid {len(valid):,}  ({time.time()-t0:.0f}s)", flush=True)
-# Fingeravtrykk av valid-radene: lagrede prognoser brukes bare hvis radene er de samme og i samme rekkefølge
-# (DuckDB garanterer ikke rekkefølgen når realtime.py kjøres på nytt).
-FP = int((valid.y.to_numpy("int64") * (np.arange(len(valid)) % 9973 + 1)).sum())
+# Lagrede prognoser brukes bare hvis valid-radene er de samme og i samme rekkefølge (fingeravtrykk, DuckDB
+# garanterer ikke rekkefølgen når realtime.py kjøres på nytt) og oppsettet er det samme (signatur; filer fra før
+# signaturen fantes godtas på fingeravtrykket alene).
+FP = fingerprint(valid)
+FP_TRAIN, META = fingerprint(train), dataset_meta("realtime")
 
 
-def cached(path):
-    if not path.exists():
-        return False
-    r = np.load(path)
-    return "fp" in r.files and int(r["fp"]) == FP
+def sig_for(name, seed):
+    v = VARIANTS[name]
+    feats = ALL if v["round2"] else [c for c in ALL if not c.startswith(ROUND2)]
+    params = dict(LGB_PARAMS, **{k: val for k, val in v.items() if k not in ("round2", "resid")}, seed=seed)
+    return signature(name, feats, params, v["resid"], FP_TRAIN, len(train), META)
+
+
+def cached(path, name, seed):
+    return cache_ok(path, allow_missing=("sig",), fp=FP, sig=sig_for(name, seed))
+
 
 for name in [v for v in args.variants.split(",") if v in VARIANTS]:
     v = VARIANTS[name]
@@ -64,7 +72,7 @@ for name in [v for v in args.variants.split(",") if v in VARIANTS]:
     params = dict(LGB_PARAMS, **{k: val for k, val in v.items() if k not in ("round2", "resid")})
     for seed in SEEDS:
         out = ENS / f"sel_{name}_s{seed}.npz"
-        if cached(out):
+        if cached(out, name, seed):
             continue
         t0 = time.time()
         dtr = lgb.Dataset(train[feats], ytr, categorical_feature=CAT)
@@ -74,7 +82,7 @@ for name in [v for v in args.variants.split(",") if v in VARIANTS]:
         p = m.predict(valid[feats], num_iteration=m.best_iteration)
         if v["resid"]:
             p = p + valid.baseline.to_numpy("float64")
-        np.savez(out, pred=p.astype("float32"), best=m.best_iteration, fp=FP)
+        save_npz(out, pred=p.astype("float32"), best=m.best_iteration, fp=FP, sig=sig_for(name, seed))
         print(f"{name} seed {seed}: {m.best_iteration} trær, valid-MAE {np.mean(np.abs(p - valid.y)):.2f} s "
               f"({len(feats)} features, {time.time()-t0:.0f}s)", flush=True)
 
@@ -86,7 +94,7 @@ dates = valid.date.to_numpy()
 preds, trees = {}, {}
 for name in VARIANTS:
     files = [ENS / f"sel_{name}_s{s}.npz" for s in SEEDS]
-    if all(cached(f) for f in files):
+    if all(cached(f, name, s) for f, s in zip(files, SEEDS)):
         rs = [np.load(f) for f in files]
         preds[name] = np.mean([r["pred"] for r in rs], axis=0).astype("float64")
         trees[name] = [int(r["best"]) for r in rs]
@@ -102,5 +110,5 @@ for name, p in preds.items():
     rows.append(row)
 res = pd.DataFrame(rows)
 res.to_csv(REPORTS / "rt_select.csv", index=False)
-print(f"\nValid sep-okt, snitt over seeds {SEEDS} (MAE i sekunder):")
+print(f"\nValid {period_label('valid')}, snitt over seeds {SEEDS} (MAE i sekunder):")
 print(res.round(2).to_string(index=False))

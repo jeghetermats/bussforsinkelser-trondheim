@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import DATA, REPORTS
+from common import DATA, MND, REPORTS, fingerprint, load_cached, period_label
 
 LIMIT = 180                     # 'mer enn 3 min forsinket'
 LEAD = 30                       # modell B vurderes 30 min før avgang
@@ -73,12 +73,12 @@ def apply_interval(tab, pred):
 ens = json.loads((REPORTS / "ensemble.json").read_text(encoding="utf-8"))["A"]
 w_blend, seeds = ens["w_valgt_på_valid"], ens["seeds"]
 va = pd.read_parquet(DATA / "valid.parquet", columns=["y", "baseline"])
-a_va = w_blend * np.mean([np.load(DATA / "ens" / f"A_s{s}.npz")["valid"] for s in seeds], axis=0) \
-    + (1 - w_blend) * va.baseline.to_numpy("float64")
+runs = [load_cached(DATA / "ens" / f"A_s{s}.npz", "src/ensemble.py", {"valid": len(va)}, fp_valid=fingerprint(va))
+        for s in seeds]
+a_va = w_blend * np.mean([r["valid"] for r in runs], axis=0) + (1 - w_blend) * va.baseline.to_numpy("float64")
 rv = pd.read_parquet(DATA / "rt_valid.parquet", columns=["y", "baseline", "lead_min"])
-fp = int((rv.y.to_numpy("int64") * (np.arange(len(rv)) % 9973 + 1)).sum())
-sel = [np.load(DATA / "ens" / f"sel_R2_s{s}.npz") for s in (42, 1)]
-assert all(int(r["fp"]) == fp for r in sel), "Valid-prognosene for B passer ikke til data/rt_valid.parquet"
+sel = [load_cached(DATA / "ens" / f"sel_R2_s{s}.npz", "src/select_rt.py", {"pred": len(rv)}, fp=fingerprint(rv))
+       for s in (42, 1)]
 b_va = np.mean([r["pred"] for r in sel], axis=0).astype("float64")
 near = (rv.lead_min.between(20, 40)).to_numpy()          # valid har tilfeldig lead; bruk 20-40 min for B
 valid = {"Historisk median": (va.baseline.to_numpy("float64"), va.y.to_numpy("float64")),
@@ -95,7 +95,7 @@ y = t.y.to_numpy("float64")
 test = {"Historisk median": t.pred_baseline.to_numpy("float64"), "Modell A": t.pred_lgbm.to_numpy("float64"),
         "Modell B": t.pred_rt.to_numpy("float64")}
 label = y > LIMIT
-month = pd.to_datetime(t.date).dt.month.map({11: "nov", 12: "des"}).to_numpy()
+month = pd.to_datetime(t.date).dt.month.map(lambda m: MND[m - 1]).to_numpy()
 
 out = {"andel_over_3min_test_%": float(label.mean() * 100), "klassifisering": {}, "intervaller": {}}
 climate = float((valid["Historisk median"][1] > LIMIT).mean())
@@ -112,11 +112,14 @@ for name, p in test.items():
     lo, hi = apply_interval(interval_table(pv, yv), p)
     inside = (y >= lo) & (y <= hi)
     out["intervaller"][name] = {"dekning_%": float(inside.mean() * 100), "median_bredde_s": float(np.median(hi - lo)),
-                                **{f"dekning_{m}_%": float(inside[month == m].mean() * 100) for m in ("nov", "des")}}
+                                **{f"dekning_{m}_%": float(inside[month == m].mean() * 100) for m in pd.unique(month)}}
 out["klassifisering"]["_Brier_bare_andel"] = brier_clim
 
 # ---------- De verste dagene ----------
-wx = pd.read_parquet(DATA / "test.parquet", columns=["snowfall", "precip", "temp"])
+wx = pd.read_parquet(DATA / "test.parquet", columns=["y", "snowfall", "precip", "temp"])
+if len(wx) != len(t) or not (wx.y.to_numpy() == t.y.to_numpy()).all():    # været kobles på etter posisjon
+    raise SystemExit("data/test.parquet og reports/test_predictions.parquet har ikke de samme radene i samme "
+                     "rekkefølge. Kjør python src/train.py og src/finalize.py på nytt.")
 d = pd.DataFrame({"date": pd.to_datetime(t.date).dt.date, "eb": np.abs(test["Historisk median"] - y),
                   "ea": np.abs(test["Modell A"] - y), "eB": np.abs(test["Modell B"] - y),
                   "y": y, "snø_cm": wx.snowfall.to_numpy(), "nedbør_mm": wx.precip.to_numpy(), "temp": wx.temp.to_numpy()})
@@ -146,7 +149,7 @@ for name, pr in calib.items():
 m = max(ax1.get_xlim()[1], ax1.get_ylim()[1])
 ax1.plot([0, m], [0, m], color="#C9CDD3", ls="--", lw=1)
 ax1.set_xlabel("Predikert sannsynlighet for > 3 min"); ax1.set_ylabel("Faktisk andel")
-ax1.set_title("Kalibrering, test nov-des (tideler)"); ax1.legend(fontsize=8)
+ax1.set_title(f"Kalibrering, test {period_label('test')} (tideler)"); ax1.legend(fontsize=8)
 ds = days.sort_index()
 x = pd.to_datetime(ds.index)
 ax2.plot(x, ds.MAE_baseline, color=cols["Historisk median"], ls="--", label="Historisk median")

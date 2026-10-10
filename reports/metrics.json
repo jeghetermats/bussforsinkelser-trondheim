@@ -12,23 +12,30 @@
     "innen_2min_%": 72.54428851880031
   },
   "LightGBM": {
-    "MAE_s": 102.58442168363213,
-    "RMSE_s": 170.63336737128162,
-    "innen_1min_%": 47.86553291815782,
-    "innen_2min_%": 73.13235598012417
+    "MAE_s": 102.43366568078304,
+    "RMSE_s": 170.27996634990834,
+    "innen_1min_%": 47.999443458167775,
+    "innen_2min_%": 73.2038610383145
   },
   "_info": {
     "quick_mode": false,
     "test_periode": "2025-11-01 - 2025-12-31",
     "n_test": 1703376,
     "n_train": 7013854,
-    "best_iter": 637,
-    "valid_MAE_s": 93.22606243264697,
+    "best_iter": 560,
+    "valid_MAE_s": 93.61468443266055,
     "mae_forbedring_mot_baseline": {
-      "forbedring_%": 3.6714282090128614,
-      "ci95_lav_%": 2.216130974564357,
-      "ci95_høy_%": 4.865116584233449,
+      "forbedring_%": 3.812990740682176,
+      "ci95_lav_%": 2.479965987902695,
+      "ci95_høy_%": 4.911463474377845,
       "dager": 61
+    },
+    "mae_forbedring_mot_baseline_ukeblokker": {
+      "forbedring_%": 3.8129907406822094,
+      "ci95_lav_%": 0.6682427312724717,
+      "ci95_høy_%": 5.736518961518419,
+      "dager": 61,
+      "uker": 10
     },
     "features": [
       "line",
@@ -57,6 +64,25 @@
       "hist_std_lsd",
       "hist_mean_lhd",
       "hist_mean_sh"
-    ]
+    ],
+    "datasett": {
+      "HIST_FOLDS": "day",
+      "HIST_AFTER": "frozen",
+      "SPLIT_HASH": "duckdb",
+      "vær": "målt",
+      "bygget": "2026-10-10 14:28:57"
+    },
+    "mae_forbedring_mot_baseline_8uker": {
+      "forbedring_%": 2.0994057669195376,
+      "ci95_lav_%": 1.2007766752480165,
+      "ci95_høy_%": 3.0202465731713346,
+      "dager": 61
+    }
+  },
+  "Baseline 2 - historisk median siste 8 uker": {
+    "MAE_s": 104.63027980903806,
+    "RMSE_s": 177.0954802594166,
+    "innen_1min_%": 49.14070645588525,
+    "innen_2min_%": 72.62254487558825
   }
 }

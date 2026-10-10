@@ -9,9 +9,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from data import (COLOR_ACTUAL, COLOR_BASELINE, COLOR_MODEL, fmt_clock, fmt_date, fmt_delay, fmt_num, load_final,
-                  load_importance, load_metrics, load_oracle, load_predictions, load_rolling, load_rt_predictions,
-                  load_rt_results, load_trips)
+from data import (COLOR_ACTUAL, COLOR_BASELINE, COLOR_MODEL, MÅNEDER, fmt_clock, fmt_date, fmt_delay, fmt_num,
+                  hourly_profile, load_final, load_importance, load_metrics, load_oracle, load_permutation_importance,
+                  load_predictions, load_rolling, load_rt_predictions, load_rt_results, load_trips, rt_trip_rows,
+                  trip_rows)
 
 st.set_page_config(page_title="Bussforsinkelser i Trondheim", page_icon=":material/directions_bus:",
                    layout="wide")
@@ -60,6 +61,7 @@ metrics = load_metrics()
 rolling = load_rolling()
 oracle = load_oracle()
 importance = load_importance()
+perm_importance = load_permutation_importance()
 rt_pred = load_rt_predictions()
 rt_res = load_rt_results()
 
@@ -159,7 +161,7 @@ with left:
             rush = t_day[(t_day.start >= 15 * 60) & (t_day.start < 17 * 60)]
             default = 0
             if not rush.empty:
-                worst = df[df.trip.isin(rush.trip)].groupby("trip")["y"].mean().idxmax()
+                worst = rush.loc[rush.mean_y.idxmax(), "trip"]
                 default = t_day["trip"].tolist().index(int(worst))
             trip = st.selectbox("Avgang", list(labels), index=default, format_func=labels.get)
         lead_label = "Dagen før"
@@ -177,12 +179,12 @@ if trip is None:
     with right:
         st.info("Linjen har ingen turer i datautvalget denne dagen. Velg en annen dato.")
 else:
-    t = df[df.trip == trip].sort_values("seq").copy()
+    t = trip_rows(df, trip).copy()
     info = trips[trips.trip == trip].iloc[0]
     lead = LEADS[lead_label]
     t["pred"] = t["pred_lgbm"]
     if lead is not None:
-        r = rt_pred[(rt_pred.trip == trip) & (rt_pred.lead_min == lead)].set_index("seq")["pred_rt"]
+        r = rt_trip_rows(rt_pred, trip, lead).set_index("seq")["pred_rt"]
         t["pred"] = t["seq"].map(r).fillna(t["pred_lgbm"])
     model_name = "modell A" if lead is None else "modell B"
     model_label = "Modell A (dagen før)" if lead is None else f"Modell B ({lead_label})"
@@ -259,17 +261,10 @@ a, b = st.columns(2)
 with a:
     with st.container(border=True):
         card_title(f"Linje {line} mot {dests[direction]} gjennom døgnet")
-        d = df[(df.line_no == line) & (df.direction == direction)].copy()
         # Følger valget "Prognose laget": dagen før = modell A, ellers modell B med valgt lead
         h_lead = LEADS[lead_label]
         h_model = "Modell A" if h_lead is None else "Modell B"
-        d["pred"] = d["pred_lgbm"]
-        if h_lead is not None:
-            rb = rt_pred[(rt_pred.lead_min == h_lead) & rt_pred.trip.isin(d.trip.unique())]
-            d = d.merge(rb[["trip", "seq", "pred_rt"]], on=["trip", "seq"], how="left")
-            d["pred"] = d["pred_rt"].fillna(d["pred_lgbm"])
-        hourly = (d.assign(time=d.minute_of_day // 60)
-                   .groupby("time")[["y", "pred", "pred_baseline"]].median() / 60).reset_index()
+        hourly = hourly_profile(line, direction, h_lead)      # bufret per linje, retning og lead
         hourly = hourly.rename(columns={"y": "Faktisk", "pred": h_model, "pred_baseline": "Historisk median"})
         hl = hourly.melt(id_vars="time", var_name="serie", value_name="min")
         hl["min_txt"] = hl["min"].map(fmt_num)
@@ -304,9 +299,12 @@ with b:
                 tooltip=[alt.Tooltip("month:N", title="Måned"), alt.Tooltip("serie:N", title="Modell"),
                          alt.Tooltip("mae_txt:N", title="MAE (s)")],
             ), width="stretch")
+            gain = (1 - rolling.MAE_lgbm / rolling.MAE_baseline) * 100
+            best = pd.to_datetime(rolling.month[gain.idxmax()]).month
             st.caption("Hver måned mars-des er testet med en modell trent bare på tidligere måneder, med early "
-                       "stopping på måneden før (enkeltmodell A). Gevinsten varierer: størst om vinteren, rundt 1 % i en "
-                       "typisk måned. Y-aksen starter ikke på 0.")
+                       "stopping på måneden før (enkeltmodell A). Gevinsten varierer: størst i "
+                       f"{MÅNEDER[best - 1]} ({fmt_num(gain.max(), sign=True)} %), median {fmt_num(gain.median())} % "
+                       "per måned. Y-aksen starter ikke på 0.")
 
 st.subheader("Hva hjelper å vite rett før avgang?")
 o_col, rt_col = st.columns(2)
@@ -399,66 +397,89 @@ with c:
             st.caption(f"{n_test:,} stoppanløp. Lavere MAE og RMSE er bedre.".replace(",", " "))
 
         card_title("Metode")
+        n_seeds = len(final["A"]["seeds"]) if final is not None else 3
+        n_seeds = {2: "to", 3: "tre", 4: "fire", 5: "fem"}.get(n_seeds, str(n_seeds))
+        w_txt = fmt_num(final["A"]["w"], 2) if final is not None else "0,85"
         st.markdown(
-            """
+            f"""
 - **Kun informasjon kjent før avgang:** linje, stopp, retning, rutetid, kalender, dagslys, vær og historisk
   forsinkelse. Forsinkelse ved forrige stopp er bevisst utelatt, den ville gjort oppgaven triviell.
 - **Tidsbasert splitt:** trening jan-aug 2025, validering sep-okt, test nov-des 2025.
 - **Historiske features** bygges fra alle ~43 mill. stoppanløp. Treningsrader får *fold-historikk* (aldri sin
   egen fasit); test- og valideringsrader ser bare fortiden. Oppsettet ble valgt over mars-okt, ikke på testen.
 - **Baseline:** historisk median fra alle rader før radens måned, oppdatert månedlig.
-- **LightGBM med L1-tap**, som treffer medianen og minimerer gjennomsnittlig absolutt feil. Snitt av tre
-  seeds; modell A blandes i tillegg litt med baselinen (vekt 0,85, valgt på sep-okt).
+- **LightGBM med L1-tap**, som treffer medianen og minimerer gjennomsnittlig absolutt feil. Snitt av {n_seeds}
+  seeds; modell A blandes i tillegg litt med baselinen (vekt {w_txt}, valgt på sep-okt).
 - **Modell B** får i tillegg sanntid fram til 2 min før prognosen: avvik fra baselinen på linjen, ved stoppet og i
   nettet, forrige buss ved samme stopp, forsinkelsesvekst per strekning summert fram til stoppet, og bussen som
   kommer inn til startholdeplassen. Featurene ble valgt på sep-okt; å trene på avviket og roligere læring hjalp ikke.
 """
         )
 
+NAMES = {
+    "hist_med_lsdhd": "Historisk median (linje, stopp, time, dagtype)", "stop": "Stopp",
+    "line": "Linje", "daylight_h": "Timer dagslys", "temp": "Temperatur", "wind": "Vind",
+    "hist_mean_lsd": "Historisk snitt (linje, stopp)", "trip_start_min": "Avgangstid",
+    "hist_mean_lhd": "Historisk snitt (linje, time)", "minute_of_day": "Klokkeslett ved stoppet",
+    "n_stops": "Antall stopp på turen", "hist_mean_sh": "Historisk snitt (stopp, time)",
+    "hist_n_lsdhd": "Antall historiske observasjoner", "snow_depth": "Snødybde", "weekday": "Ukedag",
+    "seq": "Stoppnummer i ruten", "precip_3h": "Nedbør siste 3 timer", "precip": "Nedbør",
+    "sched_min_from_start": "Planlagt tid fra start", "is_school_break": "Skoleferie",
+    "hist_std_lsd": "Historisk spredning", "direction": "Retning", "daytype": "Dagtype",
+    "route_frac": "Andel av ruten", "hour": "Time", "snowfall": "Snøfall", "is_holiday": "Helligdag",
+}
+
+
+def importance_chart(top, value, title, fmt_dec=1):
+    top = top.copy()
+    top["navn"] = top["feature"].map(NAMES).fillna(top["feature"])
+    top["txt"] = top[value].map(lambda v: fmt_num(v, fmt_dec))
+    return (
+        alt.Chart(top).mark_bar(color=COLOR_MODEL, cornerRadiusEnd=3)
+        .encode(
+            x=alt.X(f"{value}:Q", title=title, axis=alt.Axis(tickCount=6, labelExpr=COMMA)),
+            y=alt.Y("navn:N", sort="-x", title=None, axis=alt.Axis(labelLimit=300)),
+            tooltip=[alt.Tooltip("navn:N", title="Feature"), alt.Tooltip("txt:N", title=title)],
+        )
+        .properties(height=30 * len(top))
+    )
+
+
 with e:
     with st.container(border=True):
-        if importance is not None:
+        if perm_importance is not None:      # src/importance.py: hva modellen faktisk bruker
             card_title("Hva modell A legger vekt på")
-            names = {
-                "hist_med_lsdhd": "Historisk median (linje, stopp, time, dagtype)", "stop": "Stopp",
-                "line": "Linje", "daylight_h": "Timer dagslys", "temp": "Temperatur", "wind": "Vind",
-                "hist_mean_lsd": "Historisk snitt (linje, stopp)", "trip_start_min": "Avgangstid",
-                "hist_mean_lhd": "Historisk snitt (linje, time)", "minute_of_day": "Klokkeslett ved stoppet",
-                "n_stops": "Antall stopp på turen", "hist_mean_sh": "Historisk snitt (stopp, time)",
-                "hist_n_lsdhd": "Antall historiske observasjoner", "snow_depth": "Snødybde", "weekday": "Ukedag",
-                "seq": "Stoppnummer i ruten", "precip_3h": "Nedbør siste 3 timer", "precip": "Nedbør",
-                "sched_min_from_start": "Planlagt tid fra start", "is_school_break": "Skoleferie",
-                "hist_std_lsd": "Historisk spredning", "direction": "Retning", "daytype": "Dagtype",
-                "route_frac": "Andel av ruten", "hour": "Time", "snowfall": "Snøfall", "is_holiday": "Helligdag",
-            }
-            top = importance.sort_values("gain_pct", ascending=False).head(10).copy()
-            top["navn"] = top["feature"].map(names).fillna(top["feature"])
-            top["gain_txt"] = top["gain_pct"].map(fmt_num)
-            st.altair_chart(
-                alt.Chart(top).mark_bar(color=COLOR_MODEL, cornerRadiusEnd=3)
-                .encode(
-                    x=alt.X("gain_pct:Q", title="Andel av modellens gain (%)", axis=alt.Axis(tickCount=6)),
-                    y=alt.Y("navn:N", sort="-x", title=None, axis=alt.Axis(labelLimit=300)),
-                    tooltip=[alt.Tooltip("navn:N", title="Feature"),
-                             alt.Tooltip("gain_txt:N", title="%")],
-                )
-                .properties(height=30 * len(top)),
-                width="stretch",
+            top = perm_importance.sort_values("mae_økning_s", ascending=False).head(10)
+            st.altair_chart(importance_chart(top, "mae_økning_s", "Økning i MAE når featuren stokkes (s)"),
+                            width="stretch")
+            st.caption(
+                "Permutasjonsviktighet: hvor mange sekunder feilen på testdata øker når én feature stokkes om, så "
+                "modellen ikke lenger kan bruke den (enkeltmodell A). Viser hva modellen faktisk bruker, uten å "
+                "overdrive features med mange verdier slik gain gjør."
             )
+        elif importance is not None:
+            card_title("Hva modell A legger vekt på")
+            top = importance.sort_values("gain_pct", ascending=False).head(10)
+            st.altair_chart(importance_chart(top, "gain_pct", "Andel av modellens gain (%)"), width="stretch")
             st.caption(
                 "Gain = hvor mye hver feature reduserer feilen i trærne. Stopp og linje har tusenvis av verdier "
                 "og kan dele opp dataene på mange måter, så gain overdriver ofte slike kategorier."
             )
 
         card_title("Begrensninger")
+        # Treffsikkerheten innenfor +/-1 minutt leses fra resultatfilene, ikke skrevet inn for hånd
+        oftere = "litt oftere enn" if base["innen_1min_%"] > lgbm["innen_1min_%"] else "sjeldnere enn"
+        hit = (f"Innenfor +/-1 minutt treffer baselinen {oftere} modell A ({fmt_num(base['innen_1min_%'])} % mot "
+               f"{fmt_num(lgbm['innen_1min_%'])} %)")
+        if has_rt:
+            hit += f"; B treffer {fmt_num(rt30['innen_1min_%'])} % 30 min før avgang"
         st.markdown(
-            """
+            f"""
 - Før avgang er mye av forsinkelsen tilfeldig, så forbedringen over en god historisk regel er moderat.
 - Sanntidsdataene er de endelige registrerte tidene. Den ekte strømmen kan komme senere eller bli rettet,
   derav bufferen på 2 min.
 - Værdata er målt vær, ikke værvarsel. En ekte tjeneste måtte brukt varsel.
-- Innenfor +/-1 minutt treffer baselinen litt oftere enn modell A (49,3 % mot 48,6 %); B treffer oftest
-  (50,1 %). Modellenes største styrke er færre store bom.
+- {hit}. Modellenes største styrke er færre store bom.
 - Den innkommende bussen finnes bare for ~10 % av turene (samme linje, samme holdeplassnavn); busser som bytter
   linje på endeholdeplassen er ikke med.
 - Svakere enn baselinen på nattbusser kl. 01-04, der det er få observasjoner.

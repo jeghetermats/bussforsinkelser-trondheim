@@ -1,0 +1,5 @@
+# Linjeskift: LF i repoet og i arbeidskopien på alle maskiner, så filene ikke vises som endret når
+# repoet brukes fra både Windows og Linux.
+* text=auto eol=lf
+*.png binary
+*.parquet binary
