@@ -16,7 +16,8 @@ skriver hvordan du fortsetter. Rådata (retrieval.py) og vær (src/weather.py) h
 Stoppe og fortsette senere: trykk Ctrl+C, eller lag en tom fil logs/STOPP (for terminaler der Ctrl+C ikke kommer
 fram, f.eks. kjørevinduet i noen IDE-er). Steget som kjører avsluttes da innen et sekund, sammen med alle
 prosessene det har startet. Fortsett med --resume; det avbrutte steget kjøres da på nytt fra starten, men
-rolling_eval, ensemble, select_rt og ablation lagrer underveis og hopper over det som er ferdig.
+rolling_eval, ensemble, select_rt og ablation lagrer underveis og hopper over det som er ferdig (så lenge
+datasettene ikke er bygget på nytt i mellomtiden).
 """
 import argparse
 import datetime as dt
@@ -34,7 +35,9 @@ PY = sys.executable
 
 # (navn, argumenter, ekstra miljøvariabler, beskrivelse)
 STEPS = [
-    ("tests_before", ["-m", "pytest", "-q"], {}, "tester (enhet, lekkasje, app, tall i README)"),
+    # Tallene i README sjekkes bare etterpå: før en ny kjøring er det vanlig at de ikke stemmer ennå
+    ("tests_before", ["-m", "pytest", "-q", "--ignore=tests/test_readme_numbers.py"], {},
+     "tester (enhet, lekkasje, app)"),
     ("features", ["src/features.py"], {}, "DuckDB: rensing, historikk, train/valid/test"),
     ("train", ["src/train.py"], {}, "modell A + test"),
     ("importance", ["src/importance.py"], {}, "permutasjonsviktighet for modell A (til appen)"),
@@ -55,6 +58,9 @@ CHECKS = [
     ("rolling_refit", ["src/rolling_eval.py", "--refit", "--min-rounds", "100"], {},
      "rullende evaluering som hovedmodellen (egen fil)"),
     ("ablation_cv", ["src/ablation.py", "--cv", "--seeds", "0,1"], {}, "valg over mars-okt, nå også V4u (ukefolder)"),
+    ("ensemble_cv", ["src/ensemble.py"], {}, "modell A: blandingen kontrollert over mars-okt (fra ablation_cv)"),
+    ("train_uten_turstruktur", ["src/train.py", "--without", "n_stops,route_frac"], {},
+     "modell A uten n_stops og route_frac (hvor mye gir turstrukturen?)"),
 ]
 TESTS_AFTER = ("tests_after", ["-m", "pytest", "-q"], {}, "tester igjen (tallene i README mot nye resultater)")
 LOG_DIR = ROOT / "logs"

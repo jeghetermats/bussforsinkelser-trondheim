@@ -13,6 +13,9 @@ Trener og evaluerer modellen for forsinkelse før avgang.
 Kjør:  python src/train.py               (full kjøring)
        python src/train.py --quick       (rask test på et mindre utvalg)
        python src/train.py --eval-only   (evaluerer lagret modell uten å trene)
+       python src/train.py --without n_stops,route_frac
+                                         (kontroll: samme modell uten disse featurene, skriver *_uten_*-filer og
+                                          sammenligner med den vanlige modellen på de samme testradene)
 """
 import json
 import os
@@ -31,7 +34,9 @@ from common import (CAT, LGB_PARAMS, MODELS, REPORTS, TEST_PERIOD, bootstrap_mae
 
 QUICK = "--quick" in sys.argv
 EVAL_ONLY = "--eval-only" in sys.argv
-SUFFIX = "_quick" if QUICK else ""        # hurtigkjøring skal ikke overskrive de ekte resultatene
+WITHOUT = sys.argv[sys.argv.index("--without") + 1].split(",") if "--without" in sys.argv else []
+# hurtigkjøringer og kontroller skal ikke overskrive de ekte resultatene
+SUFFIX = ("_quick" if QUICK else "") + ("_uten_" + "_".join(WITHOUT) if WITHOUT else "")
 MAX_ROUNDS = 100 if QUICK else 3000
 MODEL_PATH = MODELS / f"lgbm_pre_departure{SUFFIX}.txt"
 META_PATH = MODEL_PATH.with_suffix(".json")   # best_iter og valideringsfeil, så --eval-only har dem
@@ -47,6 +52,11 @@ print(f"Lest inn: train {len(train):,}  valid {len(valid):,}  test {len(test):,}
 
 set_categories(train, valid, test)
 FEATURES = feature_columns(train)
+if WITHOUT:
+    unknown = [c for c in WITHOUT if c not in FEATURES]
+    if unknown:
+        sys.exit(f"Ukjente features i --without: {', '.join(unknown)}")
+    FEATURES = [c for c in FEATURES if c not in WITHOUT]
 print("Features:", FEATURES)
 params = dict(LGB_PARAMS)
 
@@ -117,6 +127,20 @@ if "mae_forbedring_mot_baseline_8uker" in results["_info"]:
     b8 = results["_info"]["mae_forbedring_mot_baseline_8uker"]
     print(f"MAE-forbedring mot median siste 8 uker: {b8['forbedring_%']:.1f} % "
           f"(95 % KI {b8['ci95_lav_%']:.1f}-{b8['ci95_høy_%']:.1f} %)")
+
+# ---------- Kontroll uten features: sammenlign med den vanlige modellen på de samme radene ----------
+FULL_PATH = MODELS / "lgbm_pre_departure.txt"
+if WITHOUT and FULL_PATH.exists():
+    full_feats = json.loads(FULL_PATH.with_suffix(".json").read_text(encoding="utf-8"))["features"]
+    pred_full = lgb.Booster(model_file=str(FULL_PATH)).predict(test[full_feats])
+    vs = bootstrap_mae_gain(dates, y, pred_lgb, pred_full)
+    results["_info"]["mot_vanlig_modell"] = vs
+    results["_info"]["MAE_vanlig_modell"] = metrics(y, pred_full)["MAE_s"]
+    (REPORTS / f"metrics{SUFFIX}.json").write_text(json.dumps(results, indent=2, ensure_ascii=False),
+                                                   encoding="utf-8")
+    print(f"\nUten {', '.join(WITHOUT)}: MAE {metrics(y, pred_lgb)['MAE_s']:.2f} s mot "
+          f"{results['_info']['MAE_vanlig_modell']:.2f} s med alle features "
+          f"({-vs['forbedring_%']:+.2f} % feil, 95 % KI {-vs['ci95_høy_%']:+.2f} til {-vs['ci95_lav_%']:+.2f} %)")
 
 # ---------- Filer til Streamlit-appen ----------
 imp = pd.Series(model.feature_importance("gain"), index=FEATURES).sort_values()
