@@ -421,7 +421,7 @@ NAMES = {
     "line": "Linje", "daylight_h": "Timer dagslys", "temp": "Temperatur", "wind": "Vind",
     "hist_mean_lsd": "Historisk snitt (linje, stopp)", "trip_start_min": "Avgangstid",
     "hist_mean_lhd": "Historisk snitt (linje, time)", "minute_of_day": "Klokkeslett ved stoppet",
-    "n_stops": "Antall stopp på turen", "hist_mean_sh": "Historisk snitt (stopp, time)",
+    "n_stops": "Antall stopp på turen (planlagt)", "hist_mean_sh": "Historisk snitt (stopp, time)",
     "hist_n_lsdhd": "Antall historiske observasjoner", "snow_depth": "Snødybde", "weekday": "Ukedag",
     "seq": "Stoppnummer i ruten", "precip_3h": "Nedbør siste 3 timer", "precip": "Nedbør",
     "sched_min_from_start": "Planlagt tid fra start", "is_school_break": "Skoleferie",

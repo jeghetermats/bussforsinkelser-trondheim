@@ -24,7 +24,8 @@ Runde 2 - knyttet til hvor på ruten og hvilken buss:
                       summert langs turen fra første stopp til stopp k (rt_segcum*), og andel dekket
   innkommende buss  : siste planlagte tur på samme linje som ender ved turens startholdeplass (navn) før avgang
                       (sannsynligvis bussen som kjører turen): planlagt pause, siste kjente forsinkelse,
-                      hvor langt den har kommet og pausen som er igjen etter forsinkelsen
+                      hvor langt den har kommet og pausen som er igjen etter forsinkelsen. Endeholdeplass, sluttid
+                      og antall stopp er de planlagte (samme tur tidligere dager, se trip_plan i features.py)
 
 Utvalg og historikk er de samme som i features.py (samme turer, samme fold-historikk; HIST_FOLDS og HIST_AFTER
 leses fra data/features_meta.json, så de følger det features.py ble kjørt med).
@@ -92,16 +93,23 @@ def date_filter(col):
 
 con = connect_duckdb(DB)
 con.execute(f"ATTACH '{(DATA / 'features.duckdb').as_posix()}' AS f (READ_ONLY)")
+if not con.sql("SELECT count(*) FROM information_schema.tables WHERE table_catalog = 'f' AND table_name = 'trip_plan'"
+               ).fetchone()[0]:
+    raise SystemExit("data/features.duckdb er fra en eldre versjon uten planlagt turstruktur. Kjør features.py på nytt.")
 
 # ================= 1. Observasjoner med faktisk tidspunkt =================
+# Endeholdeplass, sluttid og antall stopp er de planlagte fra features.py (trip_plan, tidligere dager), ikke de
+# registrerte: blir en tur avkortet underveis, er det ikke kjent ved prognosetidspunktet.
 t0 = time.time()
 RAW_SQL = raw_sql(raw_files())
 con.execute(f"""
 CREATE OR REPLACE TABLE trip_ts AS
-SELECT journey_id, any_value(lineRef) AS line,
-       min(aimed_arrival_local)::TIMESTAMP AS trip_start_ts, max(aimed_arrival_local)::TIMESTAMP AS trip_end_ts,
-       arg_min(stopPointName, seq) AS origin_name, arg_max(stopPointName, seq) AS dest_name, max(seq) AS n_stops
-FROM {RAW_SQL} WHERE {date_filter('operatingDate')} GROUP BY journey_id
+SELECT r.*, p.dest_name, p.n_stops,
+       r.trip_start_ts + to_seconds(CAST(round(p.dur_min * 60) AS BIGINT)) AS trip_end_ts
+FROM (SELECT journey_id, any_value(lineRef) AS line, min(aimed_arrival_local)::TIMESTAMP AS trip_start_ts,
+             arg_min(stopPointName, seq) AS origin_name
+      FROM {RAW_SQL} WHERE {date_filter('operatingDate')} GROUP BY journey_id) r
+LEFT JOIN f.trip_plan p USING (journey_id)
 """)
 con.execute(f"""
 CREATE OR REPLACE TABLE obs AS
@@ -156,10 +164,10 @@ con.execute("""CREATE OR REPLACE TABLE obs_stop AS SELECT line, direction, stop,
                                           ORDER BY journey_id DESC, seq DESC) = 1""")
 con.execute("""CREATE OR REPLACE TABLE obs_j AS SELECT journey_id, obs_ts, y, seq FROM obs
                QUALIFY row_number() OVER (PARTITION BY journey_id, obs_ts ORDER BY seq DESC) = 1""")
-con.execute("""CREATE OR REPLACE TABLE trip_end AS SELECT * FROM trip_ts
+con.execute("""CREATE OR REPLACE TABLE trip_end AS SELECT * FROM trip_ts WHERE trip_end_ts IS NOT NULL
                QUALIFY row_number() OVER (PARTITION BY line, dest_name, trip_end_ts ORDER BY journey_id DESC) = 1""")
 if RT_INCOMING == "alle":
-    con.execute("""CREATE OR REPLACE TABLE trip_end_any AS SELECT * FROM trip_ts
+    con.execute("""CREATE OR REPLACE TABLE trip_end_any AS SELECT * FROM trip_ts WHERE trip_end_ts IS NOT NULL
                    QUALIFY row_number() OVER (PARTITION BY dest_name, trip_end_ts ORDER BY journey_id DESC) = 1""")
 log("Kumulative tabeller ferdig", t0)
 

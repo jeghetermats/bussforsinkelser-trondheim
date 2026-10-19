@@ -7,6 +7,9 @@ ikke skal kunne se, bygger datasettene på nytt og sjekker at radens features er
   * sanntid (modell B): for hver testdag i desember endres alle observasjoner etter et skjæringstidspunkt C.
     Radene med prognosetidspunkt T i timen før C (T = avgang - lead - 2 min) skal ha nøyaktig de samme
     featurene. (Rader tidligere på dagen kan se gårsdagens siste observasjoner, som er endret etter gårsdagens C.)
+  * avkortede turer: på én testdag forsvinner resten av turene som er underveis ved C (og de siste stoppene på
+    noen turer senere på dagen). Turstrukturen (antall stopp, endeholdeplass) er da ikke kjent før avgang, så de
+    gjenværende radene skal ha de samme featurene, og sanntidsradene med T før C likeså.
 De tette testdagene (en avgang hvert 5. minutt) gjør at også små lekkasjer (1-2 min etter T) blir oppdaget.
 
 Tar 20-60 sekunder. Krever duckdb (pip install duckdb).
@@ -29,6 +32,7 @@ CHECK_DAYS = ["2025-12-02", "2025-12-09", "2025-12-16", "2025-12-23"]   # tette 
 CUTOFF = {d: pd.Timestamp(d) + pd.Timedelta(hours=11, minutes=4 + 5 * i) for i, d in enumerate(CHECK_DAYS)}
 OWN_DAYS = {"train": "2025-05-06", "valid": "2025-10-06"}   # dager der hele fasiten endres i historikktesten
 SHIFT = 400                                           # sekunder lagt til forsinkelsen i data raden ikke skal se
+TRUNC_DAY = CHECK_DAYS[-1]                            # dagen med avkortede turer (senere dager kan lovlig se dem)
 
 
 def make_raw(seed=1):
@@ -108,8 +112,20 @@ def runs(tmp_path_factory):
     dec = raw.copy()
     dec.loc[late, "arrival_delay_s"] += SHIFT
 
+    # Avkortede turer på TRUNC_DAY: turer som er underveis ved C mister resten av stoppene, og hver andre tur som
+    # starter mer enn 2 timer etter C mister de to siste stoppene
+    start = raw.groupby("journey_id").aimed_arrival_local.transform("min")
+    n_stops = raw.groupby("journey_id").seq.transform("max")
+    c = CUTOFF[TRUNC_DAY]
+    on_day = day == TRUNC_DAY
+    later = start > c + pd.Timedelta(hours=2)
+    odd = raw.journey_id.str.rsplit("_", n=1).str[1].astype(int) % 2 == 1
+    cut = on_day & (((start <= c) & (obs_ts > c)) | (later & odd & (raw.seq > n_stops - 2)))
+    trunc = raw[~cut]
+
     tmp = tmp_path_factory.mktemp("lekkasje")
     out = {"base": build(raw, tmp / "base", realtime=True), "dec": build(dec, tmp / "dec", realtime=True),
+           "trunc": build(trunc, tmp / "trunc", realtime=True),
            "trip_start": raw.groupby("journey_id").aimed_arrival_local.min()}
     for split, d in OWN_DAYS.items():               # hele fasiten for én dag endres (én kjøring per dag)
         own = raw.copy()
@@ -169,3 +185,36 @@ def test_sanntidsfeatures_bruker_bare_data_foer_prognosetidspunktet(runs):
     # og featurene er faktisk fylt ut for radene som sjekkes
     assert a.loc[check, "rt_ld_n60"].gt(0).mean() > 0.9
     assert a.loc[check, "rt_in_delay"].notna().mean() > 0.2
+
+
+def _day(df):
+    return pd.to_datetime(df.date).dt.strftime("%Y-%m-%d")
+
+
+def _same_rows(a, b, keys, skip=()):
+    """Radene i b (en delmengde av a) har de samme verdiene som de samme radene i a."""
+    m = a.merge(b, on=keys, how="right", suffixes=("", "_b"), indicator=True)
+    assert len(m) == len(b) > 0 and (m._merge == "both").all(), "radene finnes ikke i begge kjøringene"
+    cols = [c for c in b.columns if c not in keys and c not in skip]
+    diff = [c for c in cols if not m[c].reset_index(drop=True).equals(m[c + "_b"].reset_index(drop=True))]
+    assert not diff, f"features endret seg når turer ble avkortet etter prognosetidspunktet: {diff}"
+
+
+def test_avkortede_turer_endrer_ikke_features(runs):
+    a, b = runs["base"]["test"], runs["trunc"]["test"]
+    a, b = a[_day(a) == TRUNC_DAY], b[_day(b) == TRUNC_DAY]
+    keys = ["journey_id", "seq"]
+    assert len(b) < len(a), "testoppsettet avkortet ingen turer"
+    shortened = b.groupby("journey_id").seq.max() < a.groupby("journey_id").seq.max().reindex(b.journey_id.unique())
+    assert shortened.sum() >= 3, "for få avkortede turer med rader igjen"
+    _same_rows(a, b, keys, skip=["dest_name"])      # dest_name er den registrerte (bare til visning i appen)
+
+
+def test_avkortede_turer_endrer_ikke_sanntidsfeatures(runs):
+    a, b = runs["base"]["rt_test"], runs["trunc"]["rt_test"]
+    T = b.journey_id.map(runs["trip_start"]) - pd.to_timedelta(b.lead_min + 2, unit="min")
+    c = CUTOFF[TRUNC_DAY]
+    check = ((_day(b) == TRUNC_DAY) & (T <= c) & (T > c - pd.Timedelta(hours=1))).to_numpy()
+    assert check.sum() > 100
+    _same_rows(a, b[check], ["journey_id", "seq", "lead_min"])
+    assert b.loc[check, "rt_in_progress"].notna().mean() > 0.2      # innkommende buss er fylt ut

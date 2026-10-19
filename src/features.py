@@ -3,10 +3,14 @@ Bygger datasettene for oppgaven:
   "Forutsi ankomstforsinkelsen ved hvert stopp FØR bussen har startet turen."
 
 Kun informasjon som er kjent før avgang brukes (rute, stopp, rutetid, kalender, vær og historikk).
-Forsinkelse ved forrige stopp brukes IKKE.
+Forsinkelse ved forrige stopp brukes IKKE. Antall stopp på turen (n_stops, route_frac) tas fra tidligere dager, ikke
+fra stoppene som ble registrert: 6,5 % av turene mangler de siste stoppene, og de er mer forsinket enn andre turer
+(src/check_trip_structure.py), så det registrerte antallet røper noe om det som skjer etter avgang.
 
 Steg, alt i DuckDB (data/features.duckdb):
-  1. clean - ALLE rensede stoppanløp (~43 mill.) med features.
+  1. trip_plan - turstrukturen slik den var planlagt: antall stopp, endeholdeplass og varighet for samme planlagte
+     tur (linje, retning, dagtype, startholdeplass og planlagt avgang) de siste 4 ukene før turens dag.
+     clean - ALLE rensede stoppanløp (~43 mill.) med features.
   2. Historikk over alle rader (se src/history.py):
        fold-historikk for periodene t.o.m. aug og t.o.m. okt  -> modellens historikk-features
        månedlig fortid                                        -> baseline (historisk median)
@@ -39,7 +43,7 @@ import sys
 import time
 
 from common import (DATA, HIST_MONTHS, P1_END, P2_END, SAMPLE_PCT, SPLITS, connect_duckdb, raw_files, raw_sql,
-                    split_hash_sql, write_dataset_meta)
+                    clean_stamp, split_hash_sql, stamp_clean, write_dataset_meta)
 from history import (baseline_select, build_oof, build_past_monthly, build_recent_monthly, feature_select, fold_expr,
                      join_sql)
 
@@ -49,6 +53,7 @@ if HIST_FOLDS not in ("day", "week") or HIST_AFTER not in ("frozen", "monthly"):
     sys.exit("HIST_FOLDS må være day eller week, HIST_AFTER må være frozen eller monthly")
 SPLIT_HASH = os.environ.get("SPLIT_HASH", "duckdb")
 RECENT_DAYS = 56                                           # 'baseline_recent': median siste 8 uker
+PLAN_DAYS = 28                                             # planlagt turstruktur: de siste 4 ukene før dagen
 
 DATA.mkdir(exist_ok=True)
 
@@ -123,22 +128,90 @@ holidays_sql = ", ".join(f"DATE '{d}'" for y in YEARS for d in holidays(y))
 school_sql = " OR ".join(f"(f.operatingDate BETWEEN DATE '{a}' AND DATE '{b}')"
                          for y in YEARS for a, b in SCHOOL_BREAKS[y])
 
+
+def daytype_sql(col):
+    """0 = hverdag, 1 = lørdag, 2 = søn- og helligdag."""
+    return f"CASE WHEN isodow({col}) = 7 OR {col} IN ({holidays_sql}) THEN 2 WHEN isodow({col}) = 6 THEN 1 ELSE 0 END"
+
+
+def upper_median(col, partition):
+    """Øvre median av col over de siste PLAN_DAYS dagene FØR radens dag (dagen selv er ikke med). Øvre, fordi
+    avkortede turer trekker ned: med like mange dager av hver variant velges den lengste."""
+    return (f"-quantile_disc(-{col}, 0.5) OVER (PARTITION BY {partition} ORDER BY d "
+            f"RANGE BETWEEN INTERVAL {PLAN_DAYS} DAYS PRECEDING AND INTERVAL 1 DAYS PRECEDING)")
+
+
+def build_trip_plan():
+    """trip_plan: én rad per tur med planlagt antall stopp (n_stops), endeholdeplass (dest_name) og minutter fra
+    første til siste stopp (dur_min), alt hentet fra tidligere dager:
+      * samme planlagte tur (linje, retning, dagtype, startholdeplass, planlagt avgang HH:MM) de siste 4 ukene:
+        hver dag teller turen med flest stopp, og n_stops er den øvre medianen over dagene. Endeholdeplass og
+        varighet er fra den siste dagen turen hadde så mange stopp.
+      * finnes ikke turen de siste 4 ukene (ny avgangstid): øvre median for linje, retning og dagtype (dagens
+        median per dag), uten endeholdeplass og varighet.
+    Turens egen dag er aldri med, så stopp som mangler fordi turen ble avkortet underveis påvirker ikke turen selv.
+    """
+    key = "line, direction, daytype, origin, start_hm"
+    con.execute(f"""
+    CREATE OR REPLACE TABLE trip_plan AS
+    WITH t AS (
+      SELECT journey_id, coalesce(any_value(lineRef), '') AS line, coalesce(any_value(directionRef), '') AS direction,
+             any_value(operatingDate) AS d, max(seq) AS n,
+             coalesce(arg_min(stopPointName, seq), '') AS origin, arg_max(stopPointName, seq) AS dest,
+             strftime(min(aimed_arrival_local), '%H:%M') AS start_hm,
+             date_diff('second', min(aimed_arrival_local), max(aimed_arrival_local)) / 60.0 AS dur_min
+      FROM {RAW_SQL} GROUP BY journey_id
+    ),
+    k AS (SELECT *, {daytype_sql('d')} AS daytype FROM t),
+    day_trip AS (       -- samme planlagte tur samme dag: den med flest stopp
+      SELECT {key}, d, n, dest, dur_min FROM k
+      QUALIFY row_number() OVER (PARTITION BY {key}, d ORDER BY n DESC, journey_id DESC) = 1
+    ),
+    plan_trip AS (
+      SELECT e.{key.replace(', ', ', e.')}, e.d, e.plan_n, p.dest, p.dur_min
+      FROM (SELECT {key}, d, {upper_median('n', key)} AS plan_n FROM day_trip) e
+      ASOF LEFT JOIN day_trip p      -- siste tidligere dag med det planlagte antallet stopp
+        ON p.line = e.line AND p.direction = e.direction AND p.daytype = e.daytype AND p.origin = e.origin
+           AND p.start_hm = e.start_hm AND p.n = e.plan_n AND p.d < e.d
+    ),
+    day_line AS (SELECT line, direction, daytype, d, -quantile_disc(-n, 0.5) AS n FROM k GROUP BY ALL),
+    plan_line AS (SELECT line, direction, daytype, d, {upper_median('n', 'line, direction, daytype')} AS plan_n
+                  FROM day_line)
+    SELECT k.journey_id, coalesce(p.plan_n, l.plan_n)::INTEGER AS n_stops, p.dest AS dest_name, p.dur_min,
+           p.plan_n IS NOT NULL AS same_trip
+    FROM k
+    LEFT JOIN plan_trip p USING ({key}, d)
+    LEFT JOIN plan_line l USING (line, direction, daytype, d)
+    """)
+    n, same, line_only = con.sql("SELECT count(*), count(*) FILTER (same_trip), "
+                                 "count(*) FILTER (NOT same_trip AND n_stops IS NOT NULL) FROM trip_plan").fetchone()
+    log(f"trip_plan: {n:,} turer, planlagt antall stopp fra samme tur {same / n * 100:.1f} %, fra linjen "
+        f"{line_only / n * 100:.1f} %, ukjent {(n - same - line_only) / n * 100:.1f} % (de første dagene)")
+
 # ================= 1. clean: alle rensede rader =================
-has_clean = con.sql("SELECT count(*) FROM information_schema.tables WHERE table_name = 'clean'").fetchone()[0] > 0
-if "--reuse" in sys.argv and has_clean:
+tables = {r[0] for r in con.sql("SELECT table_name FROM information_schema.tables "
+                                "WHERE table_catalog = current_database() AND table_schema = 'main'").fetchall()}
+if "--reuse" in sys.argv and {"clean", "trip_plan"} <= tables:
     log("Gjenbruker clean-tabellen (--reuse)")
 else:
+    if "--reuse" in sys.argv and "clean" in tables:
+        log("clean er fra en eldre versjon (antall stopp fra de registrerte stoppene) og bygges på nytt")
+    # Alle andre tabeller er laget fra clean (historikk, og utvalg og historikk fra rolling_eval.py og
+    # ablation.py) og lages på nytt når de trengs, så ingen av dem blir hengende igjen fra en eldre clean
+    for t in sorted(tables):
+        con.execute(f'DROP TABLE "{t}"')
     t0 = time.time()
+    log("Planlagt turstruktur fra tidligere dager ...")
+    build_trip_plan()
     log("Bygger clean-tabellen av alle rader (kan ta noen minutter) ...")
     con.execute(f"""
     CREATE OR REPLACE TABLE clean AS
     WITH trip AS (
-      SELECT *,
-        max(seq) OVER j AS n_stops,
+      SELECT r.*, p.n_stops,     -- planlagt antall stopp (trip_plan), ikke det registrerte
         min(aimed_arrival_local) OVER j AS trip_start,
         first_value(stopPointName) OVER js AS origin_name,
         last_value(stopPointName) OVER js  AS dest_name
-      FROM {RAW_SQL}
+      FROM {RAW_SQL} r LEFT JOIN trip_plan p USING (journey_id)
       WINDOW j AS (PARTITION BY journey_id),
              js AS (PARTITION BY journey_id ORDER BY seq ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
     ),
@@ -159,8 +232,7 @@ else:
       hour(f.aimed_arrival_local)                         AS hour,
       isodow(f.operatingDate)                             AS weekday,
       (f.operatingDate IN ({holidays_sql}))::INT          AS is_holiday,
-      CASE WHEN isodow(f.operatingDate) = 7 OR f.operatingDate IN ({holidays_sql}) THEN 2
-           WHEN isodow(f.operatingDate) = 6 THEN 1 ELSE 0 END AS daytype,   -- hverdag / lørdag / søn- og helligdag
+      {daytype_sql('f.operatingDate')}                   AS daytype,   -- hverdag / lørdag / søn- og helligdag
       ({school_sql})::INT                                 AS is_school_break,
       -- Timer dagslys i Trondheim (63.43 grader nord), i stedet for måned (test-månedene finnes ikke i treningen)
       2 * degrees(acos(greatest(-1, least(1,
@@ -174,6 +246,7 @@ else:
     {weather_join}
     ORDER BY f.operatingDate, f.journey_id, f.seq      -- fast rekkefølge (og raskere datofiltre senere)
     """)
+    stamp_clean(con)
     n, d0, d1 = con.sql("SELECT count(*), min(date), max(date) FROM clean").fetchone()
     log(f"clean: {n:,} rader, {d0} - {d1}", t0)
 
@@ -220,5 +293,6 @@ for name, (d_from, d_to) in SPLITS.items():
     log(f"{name:5s}: {n:,} rader -> {out.name}", t0)
 
 # Oppsettet lagres sammen med datasettene; lagrede prognoser i data/ens/ knyttes til dette byggetidspunktet
-write_dataset_meta("features", HIST_FOLDS=HIST_FOLDS, HIST_AFTER=HIST_AFTER, SPLIT_HASH=SPLIT_HASH, vær=weather_source)
+write_dataset_meta("features", HIST_FOLDS=HIST_FOLDS, HIST_AFTER=HIST_AFTER, SPLIT_HASH=SPLIT_HASH, vær=weather_source,
+                   antall_stopp="planlagt", clean_bygget=clean_stamp(con))
 log("Ferdig. data/features.duckdb kan slettes for å spare plass (bygges på nytt ved neste kjøring).")

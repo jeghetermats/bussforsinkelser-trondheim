@@ -1,19 +1,20 @@
 """
 Avslører turstrukturen hva som skjedde etter avgang?
 
-features.py beregner n_stops (høyeste seq), route_frac, trip_start_min og origin/dest fra stoppene som faktisk er
-registrert. Mangler de siste stoppene på en tur (f.eks. fordi en forsinket buss ble snudd før endeholdeplassen),
-blir n_stops lavere og dest_name en annen, og det er ikke kjent før avgang. Mangler de første stoppene, flyttes
+Beregnes n_stops (høyeste seq), route_frac, trip_start_min og origin/dest fra stoppene som faktisk er registrert,
+røper de noe som ikke er kjent før avgang: mangler de siste stoppene på en tur (f.eks. fordi en forsinket buss ble
+snudd før endeholdeplassen), blir n_stops lavere og dest_name en annen. Mangler de første stoppene, flyttes
 trip_start_min og origin_name.
 
 Hver tur sammenlignes med samme planlagte tur (linje, retning, dagtype og planlagt avgang) på minst 3 andre dager i
 samme måned:
   * mangler slutten: høyeste seq er lavere enn det vanlige for den planlagte turen
   * mangler starten: laveste seq er høyere enn det vanlige (turer der første stopp mangler får en senere
-    'planlagt avgang' og finner ofte ikke sin planlagte tur; derfor vises også andelen med laveste seq > 1)
+    'planlagt avgang' og finner ofte ikke sin planlagte tur; derfor vises også den vanligste laveste seq)
 Hvis avkortede turer er mer forsinket enn hele turer på samme linje (målt på de tre første registrerte stoppene,
-som begge har), lekker strukturen litt informasjon om forsinkelsen. Da bør n_stops/route_frac/origin/dest hentes
-fra rutetabellen i stedet.
+som begge har), lekker strukturen litt informasjon om forsinkelsen. Derfor tar features.py antall stopp,
+endeholdeplass og sluttid fra samme planlagte tur tidligere dager (trip_plan). Start og startholdeplass er fortsatt de
+registrerte, så andelen turer som mangler starten bør være liten.
 
 Resultat: reports/trip_structure_check.csv (per linje) og en oppsummering i terminalen.
 Kjør:     python src/check_trip_structure.py      (leser rådataene i data/raw/, trenger ikke features.py)
@@ -60,7 +61,6 @@ FROM keyed k LEFT JOIN planned p USING (line, direction, month, daytype, start_h
 con.close()
 
 d["truncated"] = d.missing_end | d.missing_start
-d["first_seq_gt_1"] = d.min_seq > 1
 c = d[d.compared]
 if c.empty:
     sys.exit("Ingen planlagte turer finnes på minst 3 dager i samme måned - for lite data til sammenligningen.")
@@ -74,7 +74,10 @@ def share(mask, weights=None):
 print(f"{len(c):,} av {len(d):,} turer sammenlignet med samme planlagte tur samme måned (minst 3 dager).")
 print(f"Avkortet: {share(c.truncated):.2f} % av turene ({share(c.truncated, c.n_rec):.2f} % av radene); "
       f"mangler siste stopp {share(c.missing_end):.2f} %, første stopp {share(c.missing_start):.2f} %.")
-print(f"Laveste registrerte seq > 1: {share(d.first_seq_gt_1):.2f} % av alle turer.")
+first = d.min_seq.value_counts(normalize=True)
+print(f"Laveste registrerte seq er {first.index[0]} for {first.iloc[0] * 100:.1f} % av turene"
+      + (" (første stopp har bare avgangstid og er ikke med, siden spørringen krever ankomsttid)."
+         if first.index[0] > 1 else "."))
 full, trunc = c[~c.truncated], c[c.truncated]
 within = (trunc.groupby("line").delay_first3.mean() - full.groupby("line").delay_first3.mean()).dropna()
 weights = trunc.groupby("line").size().reindex(within.index)
