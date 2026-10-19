@@ -1,0 +1,94 @@
+{
+  "Baseline 0 - global median": {
+    "MAE_s": 129.25748278712393,
+    "RMSE_s": 211.64315031965992,
+    "innen_1min_%": 39.72364293027494,
+    "innen_2min_%": 67.83006218239544
+  },
+  "Baseline 1 - historisk median per linje/stopp/time/dagtype": {
+    "MAE_s": 106.49428282422672,
+    "RMSE_s": 181.93870573368721,
+    "innen_1min_%": 49.33074083467185,
+    "innen_2min_%": 72.54428851880031
+  },
+  "LightGBM": {
+    "MAE_s": 103.02529111425189,
+    "RMSE_s": 173.1181003524747,
+    "innen_1min_%": 48.05580212472173,
+    "innen_2min_%": 73.19176740778313
+  },
+  "_info": {
+    "quick_mode": false,
+    "test_periode": "2025-11-01 - 2025-12-31",
+    "n_test": 1703376,
+    "n_train": 7013854,
+    "best_iter": 516,
+    "valid_MAE_s": 93.82803565243024,
+    "mae_forbedring_mot_baseline": {
+      "forbedring_%": 3.2574440786652725,
+      "ci95_lav_%": 1.9747774003485243,
+      "ci95_høy_%": 4.310087108526521,
+      "dager": 61
+    },
+    "mae_forbedring_mot_baseline_ukeblokker": {
+      "forbedring_%": 3.2574440786652503,
+      "ci95_lav_%": 0.20694051415532516,
+      "ci95_høy_%": 5.08219949354904,
+      "dager": 61,
+      "uker": 10
+    },
+    "features": [
+      "line",
+      "stop",
+      "direction",
+      "seq",
+      "sched_min_from_start",
+      "trip_start_min",
+      "minute_of_day",
+      "hour",
+      "weekday",
+      "is_holiday",
+      "daytype",
+      "is_school_break",
+      "daylight_h",
+      "temp",
+      "precip",
+      "snowfall",
+      "snow_depth",
+      "wind",
+      "precip_3h",
+      "hist_med_lsdhd",
+      "hist_mean_lsd",
+      "hist_std_lsd",
+      "hist_mean_lhd",
+      "hist_mean_sh"
+    ],
+    "datasett": {
+      "HIST_FOLDS": "day",
+      "HIST_AFTER": "frozen",
+      "SPLIT_HASH": "duckdb",
+      "vær": "målt",
+      "antall_stopp": "planlagt",
+      "bygget": "2026-10-12 17:30:49"
+    },
+    "mae_forbedring_mot_baseline_8uker": {
+      "forbedring_%": 1.5339619637025126,
+      "ci95_lav_%": 0.7027797630191013,
+      "ci95_høy_%": 2.4148635976522383,
+      "dager": 61
+    },
+    "mot_vanlig_modell": {
+      "forbedring_%": -0.29199981957865884,
+      "ci95_lav_%": -0.5284143012011766,
+      "ci95_høy_%": -0.0811298563410496,
+      "dager": 61
+    },
+    "MAE_vanlig_modell": 102.72533332627758
+  },
+  "Baseline 2 - historisk median siste 8 uker": {
+    "MAE_s": 104.63027980903806,
+    "RMSE_s": 177.0954802594166,
+    "innen_1min_%": 49.14070645588525,
+    "innen_2min_%": 72.62254487558825
+  }
+}
