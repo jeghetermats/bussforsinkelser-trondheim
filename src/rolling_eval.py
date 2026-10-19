@@ -9,11 +9,12 @@ For hver måned M i mars-des 2025:
 Januar-februar mangler fordi det trengs minst én treningsmåned og én måned til early stopping.
 Desember 2024 brukes bare som historikk.
 
-Resultatene lagres etter hver måned, så skriptet kan avbrytes og startes igjen.
+Resultatene lagres etter hver måned, så skriptet kan avbrytes og startes igjen. De er merket med når clean-tabellen
+ble bygget; har features.py bygget den på nytt siden, starter evalueringen forfra.
 Krever data/features.duckdb fra features.py.
 
 Standardoppsettet stiller modellen litt svakere enn hovedmodellen: den trenes aldri på måneden som brukes til
-early stopping, og early stopping på én måned stopper noen ganger svært tidlig (21-22 trær i april og august).
+early stopping, og early stopping på én måned stopper noen ganger svært tidlig (21-26 trær i april og august).
 To valg retter på det (resultatene lagres i egne filer, så standardtallene i appen ikke endres):
   --refit           retren på trening + early stopping-måneden med beste antall trær, som hovedmodellen gjør
   --min-rounds N    bruk minst N trær (N=0: ingen nedre grense)
@@ -32,8 +33,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import (CAT, DATA, HIST_MONTHS, LGB_PARAMS, REPORTS, ROLLING_MONTHS, SAMPLE_PCT, SPLITS, connect_duckdb,
-                    ensure_dirs, metrics, replace_when_done)
+from common import (CAT, DATA, HIST_MONTHS, LGB_PARAMS, REPORTS, ROLLING_MONTHS, SAMPLE_PCT, SPLITS, clean_stamp,
+                    connect_duckdb, ensure_dirs, metrics, replace_when_done)
 from history import baseline_select, build_oof, build_past_monthly, feature_select, join_sql
 
 ap = argparse.ArgumentParser()
@@ -52,6 +53,7 @@ OUT = REPORTS / (f"rolling_quick{VARIANT}.csv" if QUICK else f"rolling_eval{VARI
 ensure_dirs()
 
 con = connect_duckdb(DATA / "features.duckdb")
+STAMP = clean_stamp(con)
 
 PAST = build_past_monthly(con, HIST_MONTHS)
 EXCLUDE = "month, bucket, journey_id, stop_name, origin_name, dest_name"
@@ -74,6 +76,9 @@ def fetch(where, prefix, hk, n=None, seed=0):
 done = pd.read_csv(OUT) if OUT.exists() else pd.DataFrame()
 if not done.empty and "early_stopping" not in done.columns:
     done = pd.DataFrame()                       # gammelt format (fast antall trær) - start på nytt
+if not done.empty and ("clean_bygget" not in done.columns or (done.clean_bygget.astype(str) != STAMP).any()):
+    print(f"{OUT.name} er laget fra en eldre clean-tabell (features.py er kjørt på nytt siden) - starter forfra")
+    done = pd.DataFrame()
 rows = done.to_dict("records")
 
 for m in MONTHS:
@@ -112,7 +117,7 @@ for m in MONTHS:
     y = test.y.to_numpy()
     m_lgb = metrics(y, model.predict(test[feats], num_iteration=trees))
     m_b1 = metrics(y, test.baseline.to_numpy(dtype="float64"))
-    rows.append({"month": str(m), "early_stopping": True, "trees": trees, "trees_early_stopping": best,
+    rows.append({"month": str(m), "clean_bygget": STAMP, "early_stopping": True, "trees": trees, "trees_early_stopping": best,
                  "refit": bool(args.refit),
                  "n_train": len(train) + (len(val) if args.refit else 0), "n_test": len(test),
                  "mean_delay_s": float(y.mean()),

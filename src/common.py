@@ -109,6 +109,43 @@ def connect_duckdb(path):
     return con
 
 
+def stamp_clean(con):
+    """Merker clean-tabellen i data/features.duckdb med byggetidspunktet (features.py, når clean er bygget)."""
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    con.execute(f"CREATE OR REPLACE TABLE clean_info AS SELECT '{now}' AS bygget")
+    return now
+
+
+def clean_stamp(con):
+    """Når clean-tabellen ble bygget. Resultater og tabeller som rolling_eval.py og ablation.py lager fra clean,
+    merkes med dette, så de lages på nytt når features.py har bygget clean på nytt (og ikke gjenbrukes fra en
+    eldre versjon av featurene). Mangler merket (clean bygget av en eldre versjon), lages det nå."""
+    if not con.sql("SELECT count(*) FROM information_schema.tables WHERE table_catalog = current_database() "
+                   "AND table_name = 'clean_info'").fetchone()[0]:
+        return stamp_clean(con)
+    return con.sql("SELECT bygget FROM clean_info").fetchone()[0]
+
+
+def features_clean_stamp():
+    """clean_stamp for datasettene features.py sist bygget: fra data/features_meta.json, ellers fra
+    data/features.duckdb (datasett bygget før merket ble lagret i meta-filen). None hvis det ikke finnes."""
+    stamp = dataset_meta("features").get("clean_bygget")
+    db = DATA / "features.duckdb"
+    if stamp or not db.exists():
+        return stamp
+    import duckdb
+    try:
+        con = duckdb.connect(str(db), read_only=True)
+    except Exception:  # noqa: BLE001 - f.eks. åpen i et annet program
+        return None
+    try:
+        return con.sql("SELECT bygget FROM clean_info").fetchone()[0]
+    except Exception:  # noqa: BLE001 - ingen clean_info ennå
+        return None
+    finally:
+        con.close()
+
+
 def ensure_dirs():
     REPORTS.mkdir(exist_ok=True)
     MODELS.mkdir(exist_ok=True)

@@ -31,8 +31,8 @@ import numpy as np
 import pandas as pd
 
 from common import (CAT, CV_MONTHS, DATA, LGB_PARAMS, REPORTS, bootstrap_mae_gain, cache_ok, dataset_meta,
-                    ensure_dirs, feature_columns, fingerprint, load, metrics, period_label, save_npz, set_categories,
-                    signature, use_refit_history)
+                    ensure_dirs, feature_columns, features_clean_stamp, fingerprint, load, metrics, period_label,
+                    save_npz, set_categories, signature, use_refit_history)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="A")
@@ -118,10 +118,21 @@ def evaluate(model, valid, test):
 
 
 def cv_check():
-    """Samme spørsmål over mars-okt fra ablasjonens måned-for-måned-kjøringer (V4, 2 seeds)."""
+    """Samme spørsmål over mars-okt fra ablasjonens måned-for-måned-kjøringer (V4, 2 seeds). Bare hvis de er laget
+    fra datasettene slik de er nå (python src/ablation.py --cv etter features.py; run_all.py: steget ensemble_cv)."""
     files = {m: [DATA / "ablation" / "cv" / f"V4_{m}_s{s}_n1000000.npz" for s in (0, 1)]
              for m in (c[:7] for c in CV_MONTHS)}
     if not all(f.exists() for fs in files.values() for f in fs):
+        return None
+    stamp = features_clean_stamp()
+
+    def current(f):
+        r = np.load(f, allow_pickle=True)
+        return "clean_bygget" in r.files and str(r["clean_bygget"]) == stamp
+
+    if stamp is None or not all(current(f) for fs in files.values() for f in fs):
+        print("Kontrollen over mars-okt hoppes over: python src/ablation.py --cv er ikke kjørt på datasettene slik "
+              "de er nå", flush=True)
         return None
     y, b, p0, p1 = [], [], [], []
     for fs in files.values():

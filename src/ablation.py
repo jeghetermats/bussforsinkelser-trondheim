@@ -31,6 +31,8 @@ Kjør:  python src/ablation.py                        (alle varianter, seed 0)
        python src/ablation.py --only V5,V6 --seeds 0,1,2
        python src/ablation.py --n-train 2000000
 Resultater: reports/ablation.csv (+ prognoser i data/ablation/, så ferdige varianter hoppes over).
+Prognosene og utvalgs- og historikktabellene (s_*, h_* i features.duckdb) er merket med når clean-tabellen ble bygget;
+har features.py bygget den på nytt siden, lages de på nytt.
 """
 import argparse
 import sys
@@ -41,7 +43,7 @@ import numpy as np
 import pandas as pd
 
 from common import (CAT, CV_MONTHS, DATA, DATA_START, LGB_PARAMS, P1_END, P2_END, REPORTS, SAMPLE_PCT, SPLITS,
-                    connect_duckdb, ensure_dirs, months, save_npz)
+                    clean_stamp, connect_duckdb, ensure_dirs, months, save_npz)
 from history import fold_expr
 
 OUT_DIR = DATA / "ablation"
@@ -90,6 +92,34 @@ OLD_HOLIDAYS = ["2025-01-01", "2025-04-13", "2025-04-17", "2025-04-18", "2025-04
                 "2024-12-26", "2025-12-25", "2025-12-26"]
 
 con = connect_duckdb(DATA / "features.duckdb")
+STAMP = clean_stamp(con)
+
+
+def table_names():
+    return [r[0] for r in con.sql("SELECT table_name FROM information_schema.tables "
+                                  "WHERE table_catalog = current_database() AND table_schema = 'main'").fetchall()]
+
+
+# Utvalg og historikk fra en eldre clean-tabell slettes (lages på nytt når de trengs)
+if "ablation_info" not in table_names() or con.sql("SELECT bygget FROM ablation_info").fetchone()[0] != STAMP:
+    old = [t for t in table_names() if t.startswith(("h_", "s_"))]
+    for t in old:
+        con.execute(f'DROP TABLE "{t}"')
+    if old:
+        print(f"Slettet {len(old)} utvalgs- og historikktabeller laget fra en eldre clean-tabell")
+    con.execute(f"CREATE OR REPLACE TABLE ablation_info AS SELECT '{STAMP}' AS bygget")
+
+
+def is_current(path):
+    """True hvis lagrede prognoser finnes og er laget fra clean-tabellen slik den er nå."""
+    if not path.exists():
+        return False
+    try:
+        r = np.load(path, allow_pickle=True)
+        return "clean_bygget" in r.files and str(r["clean_bygget"]) == STAMP
+    except Exception:  # noqa: BLE001 - uleselig fil (f.eks. fra en avbrutt kjøring)
+        return False
+
 
 old_hol = ", ".join(f"DATE '{d}'" for d in OLD_HOLIDAYS)
 CAL = {  # (is_holiday-uttrykk, daytype-uttrykk) for gammel og ny kalender
@@ -248,7 +278,7 @@ def run_cv():
             for name in names:
                 v = VARIANTS[name]
                 out = cv_dir / f"{name}_{m}_s{seed}_n{args.n_train}.npz"
-                if out.exists():
+                if is_current(out):
                     continue
                 t0 = time.time()
                 b, d0, _ = ROWSETS[v["rows"]]
@@ -273,13 +303,16 @@ def run_cv():
                                 callbacks=[lgb.early_stopping(50, verbose=False)])
                 pe = mdl.predict(ev[feats], num_iteration=mdl.best_iteration)
                 save_npz(out, pred=pe.astype("float32"), y=ev.y.to_numpy(), date=ev.date.astype(str).to_numpy(),
-                         base=ev.baseline.to_numpy("float32"), best=mdl.best_iteration)
+                         base=ev.baseline.to_numpy("float32"), best=mdl.best_iteration, clean_bygget=STAMP)
                 print(f"{m} {name} seed {seed}: {mdl.best_iteration} trær, MAE {np.mean(np.abs(pe - ev.y)):.2f} s "
                       f"(baseline {np.mean(np.abs(ev.baseline - ev.y)):.2f}) [{time.time()-t0:.0f}s]", flush=True)
 
     # ---- oppsummering: snitt over måneder og seeds, parvis mot V6 med bootstrap over dager ----
     recs, err = [], {}
-    for f in sorted(cv_dir.glob(f"*_n{args.n_train}.npz")):
+    files = sorted(cv_dir.glob(f"*_n{args.n_train}.npz"))
+    if any(not is_current(f) for f in files):
+        print(f"Hopper over {sum(not is_current(f) for f in files)} prognosefiler fra en eldre clean-tabell")
+    for f in [f for f in files if is_current(f)]:
         name, mon, sd = f.stem.split("_")[0], f.stem.split("_")[1], int(f.stem.split("_")[2][1:])
         r = np.load(f, allow_pickle=True)
         e = np.abs(r["pred"] - r["y"])
@@ -333,7 +366,7 @@ for seed in SEEDS:
     for name in run_names:
         v = VARIANTS[name]
         out = OUT_DIR / f"{name}_s{seed}_n{args.n_train}.npz"
-        if out.exists():
+        if is_current(out):
             print(f"{name} seed {seed}: ferdig fra før - hopper over")
             continue
         t0 = time.time()
@@ -370,17 +403,19 @@ for seed in SEEDS:
         m2 = lgb.train(params, lgb.Dataset(full[feats], full.y, categorical_feature=CAT), num_boost_round=best)
         pt = m2.predict(te[feats])
 
-        if not meta_path.exists():
+        if not is_current(meta_path):
             save_npz(meta_path, y=te.y.to_numpy(), date=te.date.astype(str).to_numpy(),
-                     yv=va1.y.to_numpy(), datev=va1.date.astype(str).to_numpy())
+                     yv=va1.y.to_numpy(), datev=va1.date.astype(str).to_numpy(), clean_bygget=STAMP)
         save_npz(out, test=pt.astype("float32"), valid=pv.astype("float32"),
                  base_test=te.baseline.to_numpy("float32"), base_valid=va1.baseline.to_numpy("float32"),
-                 best=best, n_test=len(te), n_valid=len(va1))
+                 best=best, n_test=len(te), n_valid=len(va1), clean_bygget=STAMP)
         print(f"  {best} trær | valid-MAE {np.mean(np.abs(pv - va1.y)):.2f} s | "
               f"test-MAE {np.mean(np.abs(pt - te.y)):.2f} s (baseline {np.mean(np.abs(te.baseline - te.y)):.2f} s) "
               f"[{time.time()-t0:.0f}s]", flush=True)
 
 # ================= Oppsummering =================
+if not is_current(meta_path):
+    raise SystemExit("Ingen resultater fra clean-tabellen slik den er nå ennå.")
 meta = np.load(meta_path, allow_pickle=True)
 y, dates, yv, datesv = meta["y"], meta["date"], meta["yv"], meta["datev"]
 special = np.isin(pd.to_datetime(dates).strftime("%m-%d"), ["12-24", "12-31"])     # julaften og nyttårsaften
@@ -388,6 +423,8 @@ special = np.isin(pd.to_datetime(dates).strftime("%m-%d"), ["12-24", "12-31"])  
 
 rows = []
 for f in sorted(OUT_DIR.glob(f"*_n{args.n_train}.npz")):
+    if not is_current(f):           # fra en eldre clean-tabell
+        continue
     name, seed = f.stem.split("_")[0], int(f.stem.split("_")[1][1:])
     r = np.load(f)
     if len(r["test"]) != len(y) or len(r["valid"]) != len(yv):
